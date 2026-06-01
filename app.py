@@ -30,6 +30,28 @@ if uploaded_file:
         "Sektor"
     ]
 
+            def yahoo_ticker(ticker):
+            try:
+                ticker = str(ticker)
+                mapping = {
+                    "XCSE": ".CO",
+                    "XSTO": ".ST",
+                    "XAMS": ".AS",
+                    "XETR": ".DE",
+                    "XNYS": "",
+                    "XNAS": "",
+                    "NEOE": ".NE"
+                }
+
+                if ":" in ticker:
+                    symbol, exchange = ticker.split(":")
+                    return symbol + mapping.get(exchange, "")
+                return ticker
+            except Exception:
+                return ticker
+
+        df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
+    
     missing_cols = [col for col in required_cols if col not in df.columns]
 
     if missing_cols:
