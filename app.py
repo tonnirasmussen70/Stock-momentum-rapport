@@ -12,18 +12,50 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 
-DATA_SOURCE = "AI_Stock.xlsx"
+# ---------------------------------------------------
+# Datakilde
+# ---------------------------------------------------
 
-df = pd.read_excel(DATA_SOURCE)
+st.sidebar.header("Datakilde")
 
-    required_cols = [
-        "Ticker",
-        "Antal",
-        "Købskurs",
-        "Aktuel kurs",
-        "Beholdning",
-        "Gevinst",
-        "Sektor"
+data_mode = st.sidebar.radio(
+    "Vælg datakilde",
+    ["Automatisk fra repository", "Manuel upload"]
+)
+
+if data_mode == "Manuel upload":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload AI_Stock.xlsx",
+        type=["xlsx"]
+    )
+
+    if uploaded_file is not None:
+        df = pd.read_excel(uploaded_file)
+    else:
+        st.warning("Upload en Excel-fil for at starte.")
+        st.stop()
+
+else:
+    try:
+        df = pd.read_excel("AI_Stock.xlsx")
+    except Exception as e:
+        st.error("Kunne ikke finde eller læse AI_Stock.xlsx i repository.")
+        st.exception(e)
+        st.stop()
+
+# ---------------------------------------------------
+# Kontrol af kolonner
+# ---------------------------------------------------
+
+required_cols = [
+    "Ticker",
+    "Antal",
+    "Købskurs",
+    "Aktuel kurs",
+    "Beholdning",
+    "Gevinst",
+    "Sektor"
+]
     ]
 
     missing_cols = [col for col in required_cols if col not in df.columns]
