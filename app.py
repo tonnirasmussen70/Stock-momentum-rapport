@@ -41,7 +41,53 @@ if uploaded_file:
         col4.metric("Antal aktier", len(df))
 
         st.subheader("Porteføljeoversigt")
-        st.dataframe(df, use_container_width=True)
+
+# Lav en visningsversion af tabellen
+display_df = df.copy()
+
+# Fjern tekniske beregningskolonner fra visningen
+columns_to_hide = ["Market value", "Cost value"]
+
+display_df = display_df.drop(
+    columns=[col for col in columns_to_hide if col in display_df.columns],
+    errors="ignore"
+)
+
+# Vis pæn formatteret tabel
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    column_config={
+        "Købskurs": st.column_config.NumberColumn(
+            "Købskurs",
+            format="%.0f"
+        ),
+        "Aktuel kurs": st.column_config.NumberColumn(
+            "Aktuel kurs",
+            format="%.0f"
+        ),
+        "Beholdning": st.column_config.NumberColumn(
+            "Beholdning",
+            format="%d"
+        ),
+        "Gevinst": st.column_config.NumberColumn(
+            "Gevinst",
+            format="%.1f%%"
+        ),
+        "Gain/Loss": st.column_config.NumberColumn(
+            "Gain/Loss",
+            format="%d"
+        ),
+        "Return %": st.column_config.NumberColumn(
+            "Return %",
+            format="%.1f%%"
+        ),
+        "Weight %": st.column_config.NumberColumn(
+            "Weight %",
+            format="%.1f%%"
+        ),
+    }
+)
 
         st.subheader("Vægtning pr. aktie")
         fig = px.bar(
