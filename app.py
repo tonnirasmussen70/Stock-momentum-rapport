@@ -10,24 +10,46 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 
-uploaded_file = st.file_uploader("Upload stock portfolio Excel-fil", type=["xlsx"])
+uploaded_file = st.file_uploader(
+    "Upload stock portfolio Excel-fil",
+    type=["xlsx"]
+)
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
 
-    required_cols = ["Ticker", "Navn", "Antal", "Købskurs", "Aktuel kurs", "Sektor", "Target weight"]
+    required_cols = [
+        "Ticker",
+        "Antal",
+        "Købskurs",
+        "Aktuel kurs",
+        "Beholdning",
+        "Gevinst",
+        "Sektor"
+    ]
 
     missing_cols = [col for col in required_cols if col not in df.columns]
 
     if missing_cols:
         st.error(f"Mangler kolonner: {missing_cols}")
+
     else:
+        # Brug Beholdning som korrekt markedsværdi i DKK
         df["Market value"] = df["Beholdning"]
-        df["Cost value"] = df["Antal"] * df["Købskurs"]
+
+        # Cost value beregnes ud fra markedsværdi og gevinst %
+        df["Cost value"] = df["Market value"] / (1 + df["Gevinst"])
+
+        # Gevinst/tab i DKK
         df["Gain/Loss"] = df["Market value"] - df["Cost value"]
+
+        # Afkast %
         df["Return %"] = df["Gain/Loss"] / df["Cost value"]
+
+        # Porteføljevægt
         df["Weight %"] = df["Market value"] / df["Market value"].sum()
 
+        # Samlede KPI'er
         total_value = df["Market value"].sum()
         total_cost = df["Cost value"].sum()
         total_gain = total_value - total_cost
@@ -35,70 +57,91 @@ if uploaded_file:
 
         col1, col2, col3, col4 = st.columns(4)
 
-        col1.metric("Porteføljeværdi", f"{total_value:,.0f}")
-        col2.metric("Gevinst/tab", f"{total_gain:,.0f}")
-        col3.metric("Afkast %", f"{total_return:.1%}")
+        col1.metric("Porteføljeværdi", f"{total_value:,.0f}".replace(",", "."))
+        col2.metric("Gevinst/tab", f"{total_gain:,.0f}".replace(",", "."))
+        col3.metric("Afkast %", f"{total_return:.1%}".replace(".", ","))
         col4.metric("Antal aktier", len(df))
 
         st.subheader("Porteføljeoversigt")
 
-# Lav en visningsversion af tabellen
-display_df = df.copy()
+        display_df = df.copy()
 
-# Fjern tekniske beregningskolonner fra visningen
-columns_to_hide = ["Market value", "Cost value"]
+        def format_dkk(value):
+            try:
+                return f"{float(value):,.0f}".replace(",", ".")
+            except Exception:
+                return value
 
-display_df = display_df.drop(
-    columns=[col for col in columns_to_hide if col in display_df.columns],
-    errors="ignore"
-)
+        def format_pct(value):
+            try:
+                return f"{float(value) * 100:.1f}%".replace(".", ",")
+            except Exception:
+                return value
 
-# Vis pæn formatteret tabel
-st.dataframe(
-    display_df,
-    use_container_width=True,
-    column_config={
-        "Købskurs": st.column_config.NumberColumn(
-            "Købskurs",
-            format="%.0f"
-        ),
-        "Aktuel kurs": st.column_config.NumberColumn(
-            "Aktuel kurs",
-            format="%.0f"
-        ),
-        "Beholdning": st.column_config.NumberColumn(
-            "Beholdning",
-            format="%d"
-        ),
-        "Gevinst": st.column_config.NumberColumn(
-            "Gevinst",
-            format="%.1f%%"
-        ),
-        "Gain/Loss": st.column_config.NumberColumn(
-            "Gain/Loss",
-            format="%d"
-        ),
-        "Return %": st.column_config.NumberColumn(
-            "Return %",
-            format="%.1f%%"
-        ),
-        "Weight %": st.column_config.NumberColumn(
-            "Weight %",
-            format="%.1f%%"
-        ),
-    }
-)
+        def format_number(value):
+            try:
+                return f"{float(value):.0f}"
+            except Exception:
+                return value
+
+        for col in ["Købskurs", "Aktuel kurs"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(format_number)
+
+        for col in ["Beholdning", "Gain/Loss"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(format_dkk)
+
+        for col in ["Gevinst", "Return %", "Weight %"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(format_pct)
+
+        display_df = display_df.drop(
+            columns=[
+                col for col in ["Market value", "Cost value"]
+                if col in display_df.columns
+            ],
+            errors="ignore"
+        )
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
 
         st.subheader("Vægtning pr. aktie")
 
-fig = px.bar(
-    df.sort_values("Weight %", ascending=False),
-    x="Ticker",
-    y="Weight %",
-    text=df["Weight %"].apply(lambda x: f"{x:.1%}")
-)
+        fig_weight = px.bar(
+            df.sort_values("Weight %", ascending=False),
+            x="Ticker",
+            y="Weight %",
+            text=df["Weight %"].apply(lambda x: f"{x:.1%}")
+        )
 
-st.plotly_chart(fig, use_container_width=True)
+        fig_weight.update_layout(
+            yaxis_tickformat=".0%",
+            xaxis_title="Aktie",
+            yaxis_title="Vægt"
+        )
+
+        st.plotly_chart(fig_weight, use_container_width=True)
+
+        st.subheader("Sektorfordeling")
+
+        sector_df = (
+            df.groupby("Sektor", as_index=False)["Market value"]
+            .sum()
+            .sort_values("Market value", ascending=False)
+        )
+
+        fig_sector = px.pie(
+            sector_df,
+            names="Sektor",
+            values="Market value"
+        )
+
+        st.plotly_chart(fig_sector, use_container_width=True)
 
 else:
-    st.info("Upload din stock_portfolio.xlsx for at starte.")
+    st.info("Upload din AI_Stock.xlsx for at starte.")
