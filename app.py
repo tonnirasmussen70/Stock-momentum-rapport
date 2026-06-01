@@ -12,13 +12,9 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 
-uploaded_file = st.file_uploader(
-    "Upload stock portfolio Excel-fil",
-    type=["xlsx"]
-)
+DATA_SOURCE = "AI_Stock.xlsx"
 
-if uploaded_file:
-    df = pd.read_excel(uploaded_file)
+df = pd.read_excel(DATA_SOURCE)
 
     required_cols = [
         "Ticker",
@@ -637,5 +633,4 @@ if uploaded_file:
 
         st.plotly_chart(fig_sector, use_container_width=True)
 
-else:
-    st.info("Upload din AI_Stock.xlsx for at starte.")
+
