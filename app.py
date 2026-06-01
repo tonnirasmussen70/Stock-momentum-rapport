@@ -30,7 +30,7 @@ if uploaded_file:
         "Sektor"
     ]
 
-            def yahoo_ticker(ticker):
+    def yahoo_ticker(ticker):
             try:
                 ticker = str(ticker)
                 mapping = {
