@@ -57,7 +57,7 @@ required_cols = [
     "Sektor"
 ]
 
-    missing_cols = [col for col in required_cols if col not in df.columns]
+missing_cols = [col for col in required_cols if col not in df.columns]
 
     if missing_cols:
         st.error(f"Mangler kolonner: {missing_cols}")
