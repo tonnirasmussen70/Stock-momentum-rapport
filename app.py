@@ -97,6 +97,7 @@ st.dataframe(
             y="Weight %",
             text=df["Weight %"].apply(lambda x: f"{x:.1%}")
         )
+
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Sektorfordeling")
