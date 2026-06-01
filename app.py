@@ -34,7 +34,6 @@ if data_mode == "Manuel upload":
     else:
         st.warning("Upload en Excel-fil for at starte.")
         st.stop()
-
 else:
     try:
         df = pd.read_excel("AI_Stock.xlsx")
@@ -60,608 +59,626 @@ required_cols = [
 missing_cols = [col for col in required_cols if col not in df.columns]
 
 if missing_cols:
-        st.error(f"Mangler kolonner: {missing_cols}")
+    st.error(f"Mangler kolonner: {missing_cols}")
+    st.stop()
 
+# ---------------------------------------------------
+# Hjælpefunktioner
+# ---------------------------------------------------
+
+def yahoo_ticker(ticker):
+    try:
+        ticker = str(ticker)
+        mapping = {
+            "XCSE": ".CO",
+            "XSTO": ".ST",
+            "XAMS": ".AS",
+            "XETR": ".DE",
+            "XNYS": "",
+            "XNAS": "",
+            "NEOE": ".NE"
+        }
+
+        if ":" in ticker:
+            symbol, exchange = ticker.split(":")
+            return symbol + mapping.get(exchange, "")
+
+        return ticker
+
+    except Exception:
+        return ticker
+
+
+def format_dkk(value):
+    try:
+        return f"{float(value):,.0f}".replace(",", ".")
+    except Exception:
+        return value
+
+
+def format_pct(value):
+    try:
+        return f"{float(value) * 100:.1f}%".replace(".", ",")
+    except Exception:
+        return value
+
+
+def format_number(value):
+    try:
+        return f"{float(value):.0f}"
+    except Exception:
+        return value
+
+
+def format_score(value):
+    try:
+        return f"{float(value):.2f}".replace(".", ",")
+    except Exception:
+        return value
+
+
+# ---------------------------------------------------
+# Grunddata og beregninger
+# ---------------------------------------------------
+
+df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
+
+df["Market value"] = df["Beholdning"]
+df["Cost value"] = df["Market value"] / (1 + df["Gevinst"])
+df["Gain/Loss"] = df["Market value"] - df["Cost value"]
+df["Return %"] = df["Gain/Loss"] / df["Cost value"]
+df["Weight %"] = df["Market value"] / df["Market value"].sum()
+
+total_value = df["Market value"].sum()
+
+# ---------------------------------------------------
+# Sharpe / Sortino
+# ---------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def download_prices(tickers, period="1y"):
+    price_data = yf.download(
+        tickers,
+        period=period,
+        auto_adjust=True,
+        progress=False
+    )["Close"]
+
+    if isinstance(price_data, pd.Series):
+        price_data = price_data.to_frame(name=tickers[0])
+
+    return price_data
+
+
+def calculate_sharpe_sortino(dataframe, period="1y", risk_free_rate=0.02):
+    try:
+        tickers = dataframe["Yahoo"].dropna().unique().tolist()
+
+        if len(tickers) == 0:
+            return None, None
+
+        price_data = download_prices(tickers, period=period)
+        daily_returns = price_data.pct_change().dropna()
+
+        if daily_returns.empty:
+            return None, None
+
+        weights = (
+            dataframe.groupby("Yahoo")["Market value"].sum()
+            / dataframe["Market value"].sum()
+        )
+
+        weights = weights.reindex(daily_returns.columns).fillna(0)
+
+        portfolio_returns = daily_returns.dot(weights)
+
+        mean_daily_return = portfolio_returns.mean()
+        daily_volatility = portfolio_returns.std()
+
+        downside_returns = portfolio_returns[portfolio_returns < 0]
+        downside_volatility = downside_returns.std()
+
+        annual_return = mean_daily_return * 252
+        annual_volatility = daily_volatility * np.sqrt(252)
+        annual_downside_volatility = downside_volatility * np.sqrt(252)
+
+        if annual_volatility == 0 or pd.isna(annual_volatility):
+            sharpe = None
+        else:
+            sharpe = (annual_return - risk_free_rate) / annual_volatility
+
+        if annual_downside_volatility == 0 or pd.isna(annual_downside_volatility):
+            sortino = None
+        else:
+            sortino = (annual_return - risk_free_rate) / annual_downside_volatility
+
+        return sharpe, sortino
+
+    except Exception:
+        return None, None
+
+
+sharpe_score, sortino_score = calculate_sharpe_sortino(df)
+
+# ---------------------------------------------------
+# KPI'er
+# ---------------------------------------------------
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Porteføljeværdi", format_dkk(total_value))
+
+if sharpe_score is not None:
+    col2.metric("Sharpe score", format_score(sharpe_score))
+else:
+    col2.metric("Sharpe score", "N/A")
+
+if sortino_score is not None:
+    col3.metric("Sortino score", format_score(sortino_score))
+else:
+    col3.metric("Sortino score", "N/A")
+
+col4.metric("Antal aktier", len(df))
+
+# ---------------------------------------------------
+# Momentum-lignende scoringmodel
+# ---------------------------------------------------
+
+df["Current weight"] = df["Weight %"]
+
+
+def performance_score(gain):
+    try:
+        gain = float(gain)
+
+        if gain >= 0.40:
+            return 5
+        elif gain >= 0.15:
+            return 4
+        elif gain >= 0.00:
+            return 3
+        elif gain >= -0.15:
+            return 2
+        else:
+            return 1
+    except Exception:
+        return 2
+
+
+df["Momentum score"] = df["Gevinst"].apply(performance_score)
+
+
+def concentration_risk(weight):
+    try:
+        weight = float(weight)
+
+        if weight >= 0.18:
+            return 5
+        elif weight >= 0.12:
+            return 4
+        elif weight >= 0.08:
+            return 3
+        elif weight >= 0.04:
+            return 2
+        else:
+            return 1
+    except Exception:
+        return 3
+
+
+df["Concentration risk"] = df["Current weight"].apply(concentration_risk)
+
+high_risk_tickers = [
+    "AMC:XETR",
+    "IVN:NEOE",
+    "VWS:XCSE",
+    "ENR:XETR"
+]
+
+low_risk_tickers = [
+    "MSF:XETR",
+    "TSM:XNYS",
+    "ABB:XSTO"
+]
+
+
+def stock_risk_score(ticker):
+    ticker = str(ticker)
+
+    if ticker in high_risk_tickers:
+        return 5
+    elif ticker in low_risk_tickers:
+        return 2
     else:
-        # ---------------------------------------------------
-        # Hjælpefunktioner
-        # ---------------------------------------------------
+        return 3
 
-        def yahoo_ticker(ticker):
-            try:
-                ticker = str(ticker)
-                mapping = {
-                    "XCSE": ".CO",
-                    "XSTO": ".ST",
-                    "XAMS": ".AS",
-                    "XETR": ".DE",
-                    "XNYS": "",
-                    "XNAS": "",
-                    "NEOE": ".NE"
-                }
 
-                if ":" in ticker:
-                    symbol, exchange = ticker.split(":")
-                    return symbol + mapping.get(exchange, "")
+df["Stock risk"] = df["Ticker"].apply(stock_risk_score)
 
-                return ticker
+df["Risk score"] = (
+    df["Concentration risk"] * 0.50
+    + df["Stock risk"] * 0.35
+    + (6 - df["Momentum score"]) * 0.15
+)
 
-            except Exception:
-                return ticker
+df["Portfolio score"] = (
+    df["Momentum score"] * 0.65
+    + (6 - df["Risk score"]) * 0.35
+)
 
-        def format_dkk(value):
-            try:
-                return f"{float(value):,.0f}".replace(",", ".")
-            except Exception:
-                return value
+df["Portfolio score"] = df["Portfolio score"].clip(lower=0.5)
 
-        def format_pct(value):
-            try:
-                return f"{float(value) * 100:.1f}%".replace(".", ",")
-            except Exception:
-                return value
+df["Suggested weight"] = df["Portfolio score"] / df["Portfolio score"].sum()
 
-        def format_number(value):
-            try:
-                return f"{float(value):.0f}"
-            except Exception:
-                return value
+min_weight = 0.02
+max_weight = 0.12
 
-        def format_score(value):
-            try:
-                return f"{float(value):.2f}".replace(".", ",")
-            except Exception:
-                return value
+df["Suggested weight"] = df["Suggested weight"].clip(
+    lower=min_weight,
+    upper=max_weight
+)
 
-        # ---------------------------------------------------
-        # Grunddata og beregninger
-        # ---------------------------------------------------
+df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
 
-        df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
+df["Suggested value"] = df["Suggested weight"] * total_value
+df["Trade DKK"] = df["Suggested value"] - df["Market value"]
+df["Weight change"] = df["Suggested weight"] - df["Current weight"]
 
-        df["Market value"] = df["Beholdning"]
-        df["Cost value"] = df["Market value"] / (1 + df["Gevinst"])
-        df["Gain/Loss"] = df["Market value"] - df["Cost value"]
-        df["Return %"] = df["Gain/Loss"] / df["Cost value"]
-        df["Weight %"] = df["Market value"] / df["Market value"].sum()
+# ---------------------------------------------------
+# Porteføljeoversigt
+# ---------------------------------------------------
 
-        total_value = df["Market value"].sum()
+st.subheader("Porteføljeoversigt")
 
-        # ---------------------------------------------------
-        # Sharpe / Sortino
-        # ---------------------------------------------------
+display_df = df.copy()
 
-        def calculate_sharpe_sortino(dataframe, period="1y", risk_free_rate=0.02):
-            try:
-                tickers = dataframe["Yahoo"].dropna().unique().tolist()
+for col in ["Købskurs", "Aktuel kurs"]:
+    if col in display_df.columns:
+        display_df[col] = display_df[col].apply(format_number)
 
-                if len(tickers) == 0:
-                    return None, None
+for col in ["Beholdning", "Gain/Loss"]:
+    if col in display_df.columns:
+        display_df[col] = display_df[col].apply(format_dkk)
 
-                price_data = yf.download(
-                    tickers,
-                    period=period,
-                    auto_adjust=True,
-                    progress=False
-                )["Close"]
+for col in ["Gevinst", "Return %", "Weight %"]:
+    if col in display_df.columns:
+        display_df[col] = display_df[col].apply(format_pct)
 
-                if isinstance(price_data, pd.Series):
-                    price_data = price_data.to_frame(name=tickers[0])
+columns_to_hide = [
+    "Yahoo",
+    "Market value",
+    "Cost value",
+    "Current weight",
+    "Momentum score",
+    "Concentration risk",
+    "Stock risk",
+    "Risk score",
+    "Portfolio score",
+    "Suggested weight",
+    "Suggested value",
+    "Trade DKK",
+    "Weight change",
+    "Target weight"
+]
 
-                daily_returns = price_data.pct_change().dropna()
+display_df = display_df.drop(
+    columns=[col for col in columns_to_hide if col in display_df.columns],
+    errors="ignore"
+)
 
-                if daily_returns.empty:
-                    return None, None
+preferred_order = [
+    "Navn",
+    "Ticker",
+    "Weight %",
+    "Antal",
+    "Købskurs",
+    "Aktuel kurs",
+    "Beholdning",
+    "Gevinst",
+    "Gain/Loss",
+    "Return %",
+    "Valuta",
+    "Sektor"
+]
 
-                weights = (
-                    dataframe.groupby("Yahoo")["Market value"].sum()
-                    / dataframe["Market value"].sum()
-                )
+existing_cols = [col for col in preferred_order if col in display_df.columns]
+other_cols = [col for col in display_df.columns if col not in existing_cols]
+display_df = display_df[existing_cols + other_cols]
 
-                weights = weights.reindex(daily_returns.columns).fillna(0)
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    hide_index=True
+)
 
-                portfolio_returns = daily_returns.dot(weights)
+# ---------------------------------------------------
+# Vægtning pr. aktie
+# ---------------------------------------------------
 
-                mean_daily_return = portfolio_returns.mean()
-                daily_volatility = portfolio_returns.std()
+st.subheader("Vægtning pr. aktie")
 
-                downside_returns = portfolio_returns[portfolio_returns < 0]
-                downside_volatility = downside_returns.std()
+weight_df = df.sort_values("Weight %", ascending=False).copy()
 
-                annual_return = mean_daily_return * 252
-                annual_volatility = daily_volatility * np.sqrt(252)
-                annual_downside_volatility = downside_volatility * np.sqrt(252)
+weight_df["Weight label"] = weight_df["Weight %"].apply(
+    lambda x: f"{x:.1%}".replace(".", ",")
+)
 
-                if annual_volatility == 0 or pd.isna(annual_volatility):
-                    sharpe = None
-                else:
-                    sharpe = (annual_return - risk_free_rate) / annual_volatility
+fig_weight = px.bar(
+    weight_df,
+    x="Ticker",
+    y="Weight %",
+    text="Weight label"
+)
 
-                if annual_downside_volatility == 0 or pd.isna(annual_downside_volatility):
-                    sortino = None
-                else:
-                    sortino = (annual_return - risk_free_rate) / annual_downside_volatility
+fig_weight.update_traces(
+    textposition="outside"
+)
 
-                return sharpe, sortino
+fig_weight.update_layout(
+    yaxis_tickformat=".0%",
+    xaxis_title="Aktie",
+    yaxis_title="Vægt",
+    uniformtext_minsize=10,
+    uniformtext_mode="show"
+)
 
-            except Exception:
-                return None, None
+st.plotly_chart(fig_weight, use_container_width=True)
 
-        sharpe_score, sortino_score = calculate_sharpe_sortino(df)
+# ---------------------------------------------------
+# Rebalanceringsforslag
+# ---------------------------------------------------
 
-        # ---------------------------------------------------
-        # KPI'er
-        # ---------------------------------------------------
+st.subheader("Rebalanceringsforslag")
 
-        col1, col2, col3, col4 = st.columns(4)
+rebalance_df = df.copy()
 
-        col1.metric("Porteføljeværdi", format_dkk(total_value))
 
-        if sharpe_score is not None:
-            col2.metric("Sharpe score", format_score(sharpe_score))
-        else:
-            col2.metric("Sharpe score", "N/A")
+def recommendation(row):
+    trade = row["Trade DKK"]
+    weight_change = row["Weight change"]
 
-        if sortino_score is not None:
-            col3.metric("Sortino score", format_score(sortino_score))
-        else:
-            col3.metric("Sortino score", "N/A")
+    if trade > total_value * 0.015 and weight_change > 0:
+        return "Øg"
+    elif trade < -total_value * 0.015 and weight_change < 0:
+        return "Reducer"
+    else:
+        return "Hold"
 
-        col4.metric("Antal aktier", len(df))
 
-        # ---------------------------------------------------
-        # Momentum-lignende scoringmodel
-        # ---------------------------------------------------
+rebalance_df["Anbef."] = rebalance_df.apply(recommendation, axis=1)
 
-        df["Current weight"] = df["Weight %"]
+name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
 
-        def performance_score(gain):
-            try:
-                gain = float(gain)
+display_rebalance = rebalance_df[
+    [
+        name_col,
+        "Yahoo",
+        "Current weight",
+        "Suggested weight",
+        "Weight change",
+        "Market value",
+        "Trade DKK",
+        "Momentum score",
+        "Risk score",
+        "Portfolio score",
+        "Anbef."
+    ]
+].copy()
 
-                if gain >= 0.40:
-                    return 5
-                elif gain >= 0.15:
-                    return 4
-                elif gain >= 0.00:
-                    return 3
-                elif gain >= -0.15:
-                    return 2
-                else:
-                    return 1
-            except Exception:
-                return 2
+display_rebalance = display_rebalance.rename(
+    columns={
+        name_col: "Instrument",
+        "Current weight": "Aktuel",
+        "Suggested weight": "Forslag",
+        "Weight change": "Ændring",
+        "Market value": "Eksponering",
+        "Trade DKK": "Handel",
+        "Momentum score": "Momentum",
+        "Risk score": "Risiko",
+        "Portfolio score": "Score"
+    }
+)
 
-        df["Momentum score"] = df["Gevinst"].apply(performance_score)
+for col in ["Aktuel", "Forslag", "Ændring"]:
+    display_rebalance[col] = display_rebalance[col].apply(format_pct)
 
-        def concentration_risk(weight):
-            try:
-                weight = float(weight)
+for col in ["Eksponering", "Handel"]:
+    display_rebalance[col] = display_rebalance[col].apply(
+        lambda x: f"{float(x):,.0f} kr.".replace(",", ".")
+    )
 
-                if weight >= 0.18:
-                    return 5
-                elif weight >= 0.12:
-                    return 4
-                elif weight >= 0.08:
-                    return 3
-                elif weight >= 0.04:
-                    return 2
-                else:
-                    return 1
-            except Exception:
-                return 3
+for col in ["Momentum", "Risiko", "Score"]:
+    display_rebalance[col] = display_rebalance[col].apply(
+        lambda x: f"{float(x):.1f}".replace(".", ",")
+    )
 
-        df["Concentration risk"] = df["Current weight"].apply(concentration_risk)
+display_rebalance["_sort"] = rebalance_df["Trade DKK"].abs().values
+display_rebalance = display_rebalance.sort_values("_sort", ascending=False)
+display_rebalance = display_rebalance.drop(columns="_sort")
 
-        high_risk_tickers = [
-            "AMC:XETR",
-            "IVN:NEOE",
-            "VWS:XCSE",
-            "ENR:XETR"
+st.dataframe(
+    display_rebalance,
+    use_container_width=True,
+    hide_index=True
+)
+
+# ---------------------------------------------------
+# Rebalanceringsgraf
+# ---------------------------------------------------
+
+st.subheader("Nuværende vægt vs. foreslået allokering")
+
+allocation_chart_df = rebalance_df.copy()
+
+allocation_chart_df = allocation_chart_df[
+    [
+        name_col,
+        "Current weight",
+        "Suggested weight"
+    ]
+].copy()
+
+allocation_chart_df = allocation_chart_df.rename(
+    columns={
+        name_col: "Instrument",
+        "Current weight": "Nuværende",
+        "Suggested weight": "Forslag"
+    }
+)
+
+allocation_chart_df = allocation_chart_df.sort_values(
+    "Nuværende",
+    ascending=False
+)
+
+allocation_chart_df["Nuværende"] = allocation_chart_df["Nuværende"] * 100
+allocation_chart_df["Forslag"] = allocation_chart_df["Forslag"] * 100
+
+allocation_long_df = allocation_chart_df.melt(
+    id_vars="Instrument",
+    value_vars=["Nuværende", "Forslag"],
+    var_name="Type",
+    value_name="Porteføljevægt"
+)
+
+fig_allocation = px.bar(
+    allocation_long_df,
+    x="Instrument",
+    y="Porteføljevægt",
+    color="Type",
+    barmode="group",
+    text=allocation_long_df["Porteføljevægt"].apply(
+        lambda x: f"{x:.1f}%".replace(".", ",")
+    ),
+    title="Nuværende vægt vs. foreslået allokering"
+)
+
+fig_allocation.update_traces(
+    textposition="outside"
+)
+
+fig_allocation.update_layout(
+    xaxis_title="Aktie",
+    yaxis_title="Porteføljevægt (%)",
+    xaxis_tickangle=-45,
+    legend_title_text="",
+    uniformtext_minsize=9,
+    uniformtext_mode="show"
+)
+
+st.plotly_chart(fig_allocation, use_container_width=True)
+
+# ---------------------------------------------------
+# Top buys / reductions
+# ---------------------------------------------------
+
+col_buy, col_reduce = st.columns(2)
+
+with col_buy:
+    st.subheader("Top buys")
+
+    top_buys = display_rebalance[
+        display_rebalance["Anbef."] == "Øg"
+    ].head(5)
+
+    st.dataframe(
+        top_buys,
+        use_container_width=True,
+        hide_index=True
+    )
+
+with col_reduce:
+    st.subheader("Top reductions")
+
+    top_reductions = display_rebalance[
+        display_rebalance["Anbef."] == "Reducer"
+    ].head(5)
+
+    st.dataframe(
+        top_reductions,
+        use_container_width=True,
+        hide_index=True
+    )
+
+# ---------------------------------------------------
+# Risk KPI heatmap
+# ---------------------------------------------------
+
+st.subheader("Risk KPI heatmap")
+
+heatmap_df = rebalance_df[
+    [
+        name_col,
+        "Momentum score",
+        "Risk score",
+        "Portfolio score",
+        "Weight %",
+        "Suggested weight",
+        "Weight change"
+    ]
+].copy()
+
+heatmap_df = heatmap_df.rename(
+    columns={
+        name_col: "Instrument",
+        "Momentum score": "Momentum",
+        "Risk score": "Risiko",
+        "Portfolio score": "Score",
+        "Weight %": "Aktuel vægt",
+        "Suggested weight": "Forslag",
+        "Weight change": "Ændring"
+    }
+)
+
+heatmap_df = heatmap_df.sort_values("Score", ascending=False)
+
+fig_heatmap = px.imshow(
+    heatmap_df[
+        [
+            "Momentum",
+            "Risiko",
+            "Score",
+            "Aktuel vægt",
+            "Forslag",
+            "Ændring"
         ]
-
-        low_risk_tickers = [
-            "MSF:XETR",
-            "TSM:XNYS",
-            "ABB:XSTO"
-        ]
-
-        def stock_risk_score(ticker):
-            ticker = str(ticker)
-
-            if ticker in high_risk_tickers:
-                return 5
-            elif ticker in low_risk_tickers:
-                return 2
-            else:
-                return 3
-
-        df["Stock risk"] = df["Ticker"].apply(stock_risk_score)
-
-        df["Risk score"] = (
-            df["Concentration risk"] * 0.50
-            + df["Stock risk"] * 0.35
-            + (6 - df["Momentum score"]) * 0.15
-        )
-
-        df["Portfolio score"] = (
-            df["Momentum score"] * 0.65
-            + (6 - df["Risk score"]) * 0.35
-        )
-
-        df["Portfolio score"] = df["Portfolio score"].clip(lower=0.5)
-
-        df["Suggested weight"] = df["Portfolio score"] / df["Portfolio score"].sum()
-
-        min_weight = 0.02
-        max_weight = 0.12
-
-        df["Suggested weight"] = df["Suggested weight"].clip(
-            lower=min_weight,
-            upper=max_weight
-        )
-
-        df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
-
-        df["Suggested value"] = df["Suggested weight"] * total_value
-        df["Trade DKK"] = df["Suggested value"] - df["Market value"]
-        df["Weight change"] = df["Suggested weight"] - df["Current weight"]
-
-        # ---------------------------------------------------
-        # Porteføljeoversigt
-        # ---------------------------------------------------
-
-        st.subheader("Porteføljeoversigt")
-
-        display_df = df.copy()
-
-        for col in ["Købskurs", "Aktuel kurs"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(format_number)
-
-        for col in ["Beholdning", "Gain/Loss"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(format_dkk)
-
-        for col in ["Gevinst", "Return %", "Weight %"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(format_pct)
-
-        columns_to_hide = [
-            "Yahoo",
-            "Market value",
-            "Cost value",
-            "Current weight",
-            "Momentum score",
-            "Concentration risk",
-            "Stock risk",
-            "Risk score",
-            "Portfolio score",
-            "Suggested weight",
-            "Suggested value",
-            "Trade DKK",
-            "Weight change",
-            "Target weight"
-        ]
-
-        display_df = display_df.drop(
-            columns=[col for col in columns_to_hide if col in display_df.columns],
-            errors="ignore"
-        )
-
-        preferred_order = [
-            "Navn",
-            "Ticker",
-            "Weight %",
-            "Antal",
-            "Købskurs",
-            "Aktuel kurs",
-            "Beholdning",
-            "Gevinst",
-            "Gain/Loss",
-            "Return %",
-            "Valuta",
-            "Sektor"
-        ]
-
-        existing_cols = [col for col in preferred_order if col in display_df.columns]
-        other_cols = [col for col in display_df.columns if col not in existing_cols]
-        display_df = display_df[existing_cols + other_cols]
-
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ---------------------------------------------------
-        # Vægtning pr. aktie
-        # ---------------------------------------------------
-
-        st.subheader("Vægtning pr. aktie")
-
-        weight_df = df.sort_values("Weight %", ascending=False).copy()
-
-        weight_df["Weight label"] = weight_df["Weight %"].apply(
-            lambda x: f"{x:.1%}".replace(".", ",")
-        )
-
-        fig_weight = px.bar(
-            weight_df,
-            x="Ticker",
-            y="Weight %",
-            text="Weight label"
-        )
-
-        fig_weight.update_traces(
-            textposition="outside"
-        )
-
-        fig_weight.update_layout(
-            yaxis_tickformat=".0%",
-            xaxis_title="Aktie",
-            yaxis_title="Vægt",
-            uniformtext_minsize=10,
-            uniformtext_mode="show"
-        )
-
-        st.plotly_chart(fig_weight, use_container_width=True)
-
-        # ---------------------------------------------------
-        # Rebalanceringsforslag
-        # ---------------------------------------------------
-
-        st.subheader("Rebalanceringsforslag")
-
-        rebalance_df = df.copy()
-
-        def recommendation(row):
-            trade = row["Trade DKK"]
-            weight_change = row["Weight change"]
-
-            if trade > total_value * 0.015 and weight_change > 0:
-                return "Øg"
-            elif trade < -total_value * 0.015 and weight_change < 0:
-                return "Reducer"
-            else:
-                return "Hold"
-
-        rebalance_df["Anbef."] = rebalance_df.apply(recommendation, axis=1)
-
-        name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
-
-        display_rebalance = rebalance_df[
-            [
-                name_col,
-                "Yahoo",
-                "Current weight",
-                "Suggested weight",
-                "Weight change",
-                "Market value",
-                "Trade DKK",
-                "Momentum score",
-                "Risk score",
-                "Portfolio score",
-                "Anbef."
-            ]
-        ].copy()
-
-        display_rebalance = display_rebalance.rename(
-            columns={
-                name_col: "Instrument",
-                "Current weight": "Aktuel",
-                "Suggested weight": "Forslag",
-                "Weight change": "Ændring",
-                "Market value": "Eksponering",
-                "Trade DKK": "Handel",
-                "Momentum score": "Momentum",
-                "Risk score": "Risiko",
-                "Portfolio score": "Score"
-            }
-        )
-
-        for col in ["Aktuel", "Forslag", "Ændring"]:
-            display_rebalance[col] = display_rebalance[col].apply(format_pct)
-
-        for col in ["Eksponering", "Handel"]:
-            display_rebalance[col] = display_rebalance[col].apply(
-                lambda x: f"{float(x):,.0f} kr.".replace(",", ".")
-            )
-
-        for col in ["Momentum", "Risiko", "Score"]:
-            display_rebalance[col] = display_rebalance[col].apply(
-                lambda x: f"{float(x):.1f}".replace(".", ",")
-            )
-
-        display_rebalance["_sort"] = rebalance_df["Trade DKK"].abs().values
-        display_rebalance = display_rebalance.sort_values("_sort", ascending=False)
-        display_rebalance = display_rebalance.drop(columns="_sort")
-
-        st.dataframe(
-            display_rebalance,
-            use_container_width=True,
-            hide_index=True
-        )
-        # ---------------------------------------------------
-        # Rebalanceringsgraf: nuværende vægt vs. forslag
-        # ---------------------------------------------------
-
-        st.subheader("Nuværende vægt vs. foreslået allokering")
-
-        allocation_chart_df = rebalance_df.copy()
-
-        name_col = "Navn" if "Navn" in allocation_chart_df.columns else "Ticker"
-
-        allocation_chart_df = allocation_chart_df[
-            [
-                name_col,
-                "Current weight",
-                "Suggested weight"
-            ]
-        ].copy()
-
-        allocation_chart_df = allocation_chart_df.rename(
-            columns={
-                name_col: "Instrument",
-                "Current weight": "Nuværende",
-                "Suggested weight": "Forslag"
-            }
-        )
-
-        allocation_chart_df = allocation_chart_df.sort_values(
-            "Nuværende",
-            ascending=False
-        )
-
-        allocation_chart_df["Nuværende"] = allocation_chart_df["Nuværende"] * 100
-        allocation_chart_df["Forslag"] = allocation_chart_df["Forslag"] * 100
-
-        allocation_long_df = allocation_chart_df.melt(
-            id_vars="Instrument",
-            value_vars=["Nuværende", "Forslag"],
-            var_name="Type",
-            value_name="Porteføljevægt"
-        )
-
-        fig_allocation = px.bar(
-            allocation_long_df,
-            x="Instrument",
-            y="Porteføljevægt",
-            color="Type",
-            barmode="group",
-            text=allocation_long_df["Porteføljevægt"].apply(
-                lambda x: f"{x:.1f}%".replace(".", ",")
-            ),
-            title="Nuværende vægt vs. foreslået allokering"
-        )
-
-        fig_allocation.update_traces(
-            textposition="outside"
-        )
-
-        fig_allocation.update_layout(
-            xaxis_title="Aktie",
-            yaxis_title="Porteføljevægt (%)",
-            xaxis_tickangle=-45,
-            legend_title_text="",
-            uniformtext_minsize=9,
-            uniformtext_mode="show"
-        )
-
-        st.plotly_chart(fig_allocation, use_container_width=True)
-        # ---------------------------------------------------
-        # Top buys / reductions
-        # ---------------------------------------------------
-
-        col_buy, col_reduce = st.columns(2)
-
-        with col_buy:
-            st.subheader("Top buys")
-
-            top_buys = display_rebalance[
-                display_rebalance["Anbef."] == "Øg"
-            ].head(5)
-
-            st.dataframe(
-                top_buys,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        with col_reduce:
-            st.subheader("Top reductions")
-
-            top_reductions = display_rebalance[
-                display_rebalance["Anbef."] == "Reducer"
-            ].head(5)
-
-            st.dataframe(
-                top_reductions,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        # ---------------------------------------------------
-        # Risk KPI heatmap
-        # ---------------------------------------------------
-
-        st.subheader("Risk KPI heatmap")
-
-        heatmap_df = rebalance_df[
-            [
-                name_col,
-                "Momentum score",
-                "Risk score",
-                "Portfolio score",
-                "Weight %",
-                "Suggested weight",
-                "Weight change"
-            ]
-        ].copy()
-
-        heatmap_df = heatmap_df.rename(
-            columns={
-                name_col: "Instrument",
-                "Momentum score": "Momentum",
-                "Risk score": "Risiko",
-                "Portfolio score": "Score",
-                "Weight %": "Aktuel vægt",
-                "Suggested weight": "Forslag",
-                "Weight change": "Ændring"
-            }
-        )
-
-        heatmap_df = heatmap_df.sort_values("Score", ascending=False)
-
-        fig_heatmap = px.imshow(
-            heatmap_df[
-                [
-                    "Momentum",
-                    "Risiko",
-                    "Score",
-                    "Aktuel vægt",
-                    "Forslag",
-                    "Ændring"
-                ]
-            ],
-            x=[
-                "Momentum",
-                "Risiko",
-                "Score",
-                "Aktuel vægt",
-                "Forslag",
-                "Ændring"
-            ],
-            y=heatmap_df["Instrument"],
-            aspect="auto",
-            text_auto=".2f"
-        )
-
-        fig_heatmap.update_layout(
-            xaxis_title="KPI",
-            yaxis_title="Aktie"
-        )
-
-        st.plotly_chart(fig_heatmap, use_container_width=True)
-
-        # ---------------------------------------------------
-        # Sektorfordeling
-        # ---------------------------------------------------
-
-        st.subheader("Sektorfordeling")
-
-        sector_df = (
-            df.groupby("Sektor", as_index=False)["Market value"]
-            .sum()
-            .sort_values("Market value", ascending=False)
-        )
-
-        fig_sector = px.pie(
-            sector_df,
-            names="Sektor",
-            values="Market value"
-        )
-
-        st.plotly_chart(fig_sector, use_container_width=True)
-
-
+    ],
+    x=[
+        "Momentum",
+        "Risiko",
+        "Score",
+        "Aktuel vægt",
+        "Forslag",
+        "Ændring"
+    ],
+    y=heatmap_df["Instrument"],
+    aspect="auto",
+    text_auto=".2f"
+)
+
+fig_heatmap.update_layout(
+    xaxis_title="KPI",
+    yaxis_title="Aktie"
+)
+
+st.plotly_chart(fig_heatmap, use_container_width=True)
+
+# ---------------------------------------------------
+# Sektorfordeling
+# ---------------------------------------------------
+
+st.subheader("Sektorfordeling")
+
+sector_df = (
+    df.groupby("Sektor", as_index=False)["Market value"]
+    .sum()
+    .sort_values("Market value", ascending=False)
+)
+
+fig_sector = px.pie(
+    sector_df,
+    names="Sektor",
+    values="Market value"
+)
+
+st.plotly_chart(fig_sector, use_container_width=True)
