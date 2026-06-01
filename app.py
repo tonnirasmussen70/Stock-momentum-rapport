@@ -91,23 +91,14 @@ st.dataframe(
 
         st.subheader("Vægtning pr. aktie")
 
-        fig = px.bar(
-            df.sort_values("Weight %", ascending=False),
-            x="Navn",
-            y="Weight %",
-            text=df["Weight %"].apply(lambda x: f"{x:.1%}")
-        )
+fig = px.bar(
+    df.sort_values("Weight %", ascending=False),
+    x="Ticker",
+    y="Weight %",
+    text=df["Weight %"].apply(lambda x: f"{x:.1%}")
+)
 
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Sektorfordeling")
-        sector_df = df.groupby("Sektor")["Market value"].sum().reset_index()
-        fig2 = px.pie(
-            sector_df,
-            names="Sektor",
-            values="Market value"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.info("Upload din stock_portfolio.xlsx for at starte.")
