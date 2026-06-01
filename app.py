@@ -455,7 +455,73 @@ if uploaded_file:
             use_container_width=True,
             hide_index=True
         )
+        # ---------------------------------------------------
+        # Rebalanceringsgraf: nuværende vægt vs. forslag
+        # ---------------------------------------------------
 
+        st.subheader("Nuværende vægt vs. foreslået allokering")
+
+        allocation_chart_df = rebalance_df.copy()
+
+        name_col = "Navn" if "Navn" in allocation_chart_df.columns else "Ticker"
+
+        allocation_chart_df = allocation_chart_df[
+            [
+                name_col,
+                "Current weight",
+                "Suggested weight"
+            ]
+        ].copy()
+
+        allocation_chart_df = allocation_chart_df.rename(
+            columns={
+                name_col: "Instrument",
+                "Current weight": "Nuværende",
+                "Suggested weight": "Forslag"
+            }
+        )
+
+        allocation_chart_df = allocation_chart_df.sort_values(
+            "Nuværende",
+            ascending=False
+        )
+
+        allocation_chart_df["Nuværende"] = allocation_chart_df["Nuværende"] * 100
+        allocation_chart_df["Forslag"] = allocation_chart_df["Forslag"] * 100
+
+        allocation_long_df = allocation_chart_df.melt(
+            id_vars="Instrument",
+            value_vars=["Nuværende", "Forslag"],
+            var_name="Type",
+            value_name="Porteføljevægt"
+        )
+
+        fig_allocation = px.bar(
+            allocation_long_df,
+            x="Instrument",
+            y="Porteføljevægt",
+            color="Type",
+            barmode="group",
+            text=allocation_long_df["Porteføljevægt"].apply(
+                lambda x: f"{x:.1f}%".replace(".", ",")
+            ),
+            title="Nuværende vægt vs. foreslået allokering"
+        )
+
+        fig_allocation.update_traces(
+            textposition="outside"
+        )
+
+        fig_allocation.update_layout(
+            xaxis_title="Aktie",
+            yaxis_title="Porteføljevægt (%)",
+            xaxis_tickangle=-45,
+            legend_title_text="",
+            uniformtext_minsize=9,
+            uniformtext_mode="show"
+        )
+
+        st.plotly_chart(fig_allocation, use_container_width=True)
         # ---------------------------------------------------
         # Top buys / reductions
         # ---------------------------------------------------
