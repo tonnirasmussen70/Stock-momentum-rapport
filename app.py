@@ -90,6 +90,7 @@ st.dataframe(
 )
 
         st.subheader("Vægtning pr. aktie")
+
         fig = px.bar(
             df.sort_values("Weight %", ascending=False),
             x="Navn",
