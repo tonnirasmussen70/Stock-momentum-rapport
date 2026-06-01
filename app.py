@@ -110,7 +110,7 @@ if uploaded_file:
             hide_index=True
         )
 
-        st.subheader("Vægtning pr. aktie")
+    st.subheader("Vægtning pr. aktie")
 
 weight_df = df.sort_values("Weight %", ascending=False).copy()
 
