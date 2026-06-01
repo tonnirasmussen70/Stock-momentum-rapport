@@ -22,7 +22,7 @@ if uploaded_file:
     if missing_cols:
         st.error(f"Mangler kolonner: {missing_cols}")
     else:
-        df["Market value"] = df["Antal"] * df["Aktuel kurs"]
+        df["Market value"] = df["Beholdning"]
         df["Cost value"] = df["Antal"] * df["Købskurs"]
         df["Gain/Loss"] = df["Market value"] - df["Cost value"]
         df["Return %"] = df["Gain/Loss"] / df["Cost value"]
