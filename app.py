@@ -97,11 +97,18 @@ if uploaded_file:
                 display_df[col] = display_df[col].apply(format_pct)
 
         display_df = display_df.drop(
-            columns=[
-                col for col in ["Market value", "Cost value"]
-                if col in display_df.columns
-            ],
-            errors="ignore"
+    columns=[
+        col for col in [
+            "Market value",
+            "Cost value",
+            "Target weight",
+            "Base target",
+            "Performance adjustment"
+        ]
+        if col in display_df.columns
+    ],
+    errors="ignore"
+)
         )
 
         st.dataframe(
