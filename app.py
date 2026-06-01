@@ -30,7 +30,17 @@ if uploaded_file:
         "Sektor"
     ]
 
-    def yahoo_ticker(ticker):
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        st.error(f"Mangler kolonner: {missing_cols}")
+
+    else:
+        # ---------------------------------------------------
+        # Hjælpefunktioner
+        # ---------------------------------------------------
+
+        def yahoo_ticker(ticker):
             try:
                 ticker = str(ticker)
                 mapping = {
@@ -46,21 +56,41 @@ if uploaded_file:
                 if ":" in ticker:
                     symbol, exchange = ticker.split(":")
                     return symbol + mapping.get(exchange, "")
+
                 return ticker
+
             except Exception:
                 return ticker
 
-        df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
-    
-    missing_cols = [col for col in required_cols if col not in df.columns]
+        def format_dkk(value):
+            try:
+                return f"{float(value):,.0f}".replace(",", ".")
+            except Exception:
+                return value
 
-    if missing_cols:
-        st.error(f"Mangler kolonner: {missing_cols}")
+        def format_pct(value):
+            try:
+                return f"{float(value) * 100:.1f}%".replace(".", ",")
+            except Exception:
+                return value
 
-    else:
+        def format_number(value):
+            try:
+                return f"{float(value):.0f}"
+            except Exception:
+                return value
+
+        def format_score(value):
+            try:
+                return f"{float(value):.2f}".replace(".", ",")
+            except Exception:
+                return value
+
         # ---------------------------------------------------
         # Grunddata og beregninger
         # ---------------------------------------------------
+
+        df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
 
         df["Market value"] = df["Beholdning"]
         df["Cost value"] = df["Market value"] / (1 + df["Gevinst"])
@@ -69,9 +99,68 @@ if uploaded_file:
         df["Weight %"] = df["Market value"] / df["Market value"].sum()
 
         total_value = df["Market value"].sum()
-        total_cost = df["Cost value"].sum()
-        total_gain = total_value - total_cost
-        total_return = total_gain / total_cost
+
+        # ---------------------------------------------------
+        # Sharpe / Sortino
+        # ---------------------------------------------------
+
+        def calculate_sharpe_sortino(dataframe, period="1y", risk_free_rate=0.02):
+            try:
+                tickers = dataframe["Yahoo"].dropna().unique().tolist()
+
+                if len(tickers) == 0:
+                    return None, None
+
+                price_data = yf.download(
+                    tickers,
+                    period=period,
+                    auto_adjust=True,
+                    progress=False
+                )["Close"]
+
+                if isinstance(price_data, pd.Series):
+                    price_data = price_data.to_frame(name=tickers[0])
+
+                daily_returns = price_data.pct_change().dropna()
+
+                if daily_returns.empty:
+                    return None, None
+
+                weights = (
+                    dataframe.groupby("Yahoo")["Market value"].sum()
+                    / dataframe["Market value"].sum()
+                )
+
+                weights = weights.reindex(daily_returns.columns).fillna(0)
+
+                portfolio_returns = daily_returns.dot(weights)
+
+                mean_daily_return = portfolio_returns.mean()
+                daily_volatility = portfolio_returns.std()
+
+                downside_returns = portfolio_returns[portfolio_returns < 0]
+                downside_volatility = downside_returns.std()
+
+                annual_return = mean_daily_return * 252
+                annual_volatility = daily_volatility * np.sqrt(252)
+                annual_downside_volatility = downside_volatility * np.sqrt(252)
+
+                if annual_volatility == 0 or pd.isna(annual_volatility):
+                    sharpe = None
+                else:
+                    sharpe = (annual_return - risk_free_rate) / annual_volatility
+
+                if annual_downside_volatility == 0 or pd.isna(annual_downside_volatility):
+                    sortino = None
+                else:
+                    sortino = (annual_return - risk_free_rate) / annual_downside_volatility
+
+                return sharpe, sortino
+
+            except Exception:
+                return None, None
+
+        sharpe_score, sortino_score = calculate_sharpe_sortino(df)
 
         # ---------------------------------------------------
         # KPI'er
@@ -79,9 +168,18 @@ if uploaded_file:
 
         col1, col2, col3, col4 = st.columns(4)
 
-        col1.metric("Porteføljeværdi", f"{total_value:,.0f}".replace(",", "."))
-        col2.metric("Gevinst/tab", f"{total_gain:,.0f}".replace(",", "."))
-        col3.metric("Afkast %", f"{total_return:.1%}".replace(".", ","))
+        col1.metric("Porteføljeværdi", format_dkk(total_value))
+
+        if sharpe_score is not None:
+            col2.metric("Sharpe score", format_score(sharpe_score))
+        else:
+            col2.metric("Sharpe score", "N/A")
+
+        if sortino_score is not None:
+            col3.metric("Sortino score", format_score(sortino_score))
+        else:
+            col3.metric("Sortino score", "N/A")
+
         col4.metric("Antal aktier", len(df))
 
         # ---------------------------------------------------
@@ -166,10 +264,8 @@ if uploaded_file:
 
         df["Portfolio score"] = df["Portfolio score"].clip(lower=0.5)
 
-        # Foreslået vægt ud fra score
         df["Suggested weight"] = df["Portfolio score"] / df["Portfolio score"].sum()
 
-        # Min/max vægt for enkeltaktier
         min_weight = 0.02
         max_weight = 0.12
 
@@ -178,7 +274,6 @@ if uploaded_file:
             upper=max_weight
         )
 
-        # Normaliser til 100%
         df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
 
         df["Suggested value"] = df["Suggested weight"] * total_value
@@ -193,24 +288,6 @@ if uploaded_file:
 
         display_df = df.copy()
 
-        def format_dkk(value):
-            try:
-                return f"{float(value):,.0f}".replace(",", ".")
-            except Exception:
-                return value
-
-        def format_pct(value):
-            try:
-                return f"{float(value) * 100:.1f}%".replace(".", ",")
-            except Exception:
-                return value
-
-        def format_number(value):
-            try:
-                return f"{float(value):.0f}"
-            except Exception:
-                return value
-
         for col in ["Købskurs", "Aktuel kurs"]:
             if col in display_df.columns:
                 display_df[col] = display_df[col].apply(format_number)
@@ -224,6 +301,7 @@ if uploaded_file:
                 display_df[col] = display_df[col].apply(format_pct)
 
         columns_to_hide = [
+            "Yahoo",
             "Market value",
             "Cost value",
             "Current weight",
@@ -323,28 +401,6 @@ if uploaded_file:
 
         rebalance_df["Anbef."] = rebalance_df.apply(recommendation, axis=1)
 
-        def yahoo_ticker(ticker):
-            try:
-                ticker = str(ticker)
-                mapping = {
-                    "XCSE": ".CO",
-                    "XSTO": ".ST",
-                    "XAMS": ".AS",
-                    "XETR": ".DE",
-                    "XNYS": "",
-                    "XNAS": "",
-                    "NEOE": ".NE"
-                }
-
-                if ":" in ticker:
-                    symbol, exchange = ticker.split(":")
-                    return symbol + mapping.get(exchange, "")
-                return ticker
-            except Exception:
-                return ticker
-
-        rebalance_df["Yahoo"] = rebalance_df["Ticker"].apply(yahoo_ticker)
-
         name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
 
         display_rebalance = rebalance_df[
@@ -377,32 +433,18 @@ if uploaded_file:
             }
         )
 
-        def format_pct_display(value):
-            try:
-                return f"{float(value) * 100:.1f}%".replace(".", ",")
-            except Exception:
-                return value
-
-        def format_dkk_display(value):
-            try:
-                return f"{float(value):,.0f} kr.".replace(",", ".")
-            except Exception:
-                return value
-
-        def format_score(value):
-            try:
-                return f"{float(value):.1f}".replace(".", ",")
-            except Exception:
-                return value
-
         for col in ["Aktuel", "Forslag", "Ændring"]:
-            display_rebalance[col] = display_rebalance[col].apply(format_pct_display)
+            display_rebalance[col] = display_rebalance[col].apply(format_pct)
 
         for col in ["Eksponering", "Handel"]:
-            display_rebalance[col] = display_rebalance[col].apply(format_dkk_display)
+            display_rebalance[col] = display_rebalance[col].apply(
+                lambda x: f"{float(x):,.0f} kr.".replace(",", ".")
+            )
 
         for col in ["Momentum", "Risiko", "Score"]:
-            display_rebalance[col] = display_rebalance[col].apply(format_score)
+            display_rebalance[col] = display_rebalance[col].apply(
+                lambda x: f"{float(x):.1f}".replace(".", ",")
+            )
 
         display_rebalance["_sort"] = rebalance_df["Trade DKK"].abs().values
         display_rebalance = display_rebalance.sort_values("_sort", ascending=False)
