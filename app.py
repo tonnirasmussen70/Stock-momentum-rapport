@@ -112,20 +112,32 @@ if uploaded_file:
 
         st.subheader("Vægtning pr. aktie")
 
-        fig_weight = px.bar(
-            df.sort_values("Weight %", ascending=False),
-            x="Ticker",
-            y="Weight %",
-            text=df["Weight %"].apply(lambda x: f"{x:.1%}")
-        )
+weight_df = df.sort_values("Weight %", ascending=False).copy()
 
-        fig_weight.update_layout(
-            yaxis_tickformat=".0%",
-            xaxis_title="Aktie",
-            yaxis_title="Vægt"
-        )
+weight_df["Weight label"] = weight_df["Weight %"].apply(
+    lambda x: f"{x:.1%}".replace(".", ",")
+)
 
-        st.plotly_chart(fig_weight, use_container_width=True)
+fig_weight = px.bar(
+    weight_df,
+    x="Ticker",
+    y="Weight %",
+    text="Weight label"
+)
+
+fig_weight.update_traces(
+    textposition="outside"
+)
+
+fig_weight.update_layout(
+    yaxis_tickformat=".0%",
+    xaxis_title="Aktie",
+    yaxis_title="Vægt",
+    uniformtext_minsize=10,
+    uniformtext_mode="show"
+)
+
+st.plotly_chart(fig_weight, use_container_width=True)
 
         st.subheader("Sektorfordeling")
 
