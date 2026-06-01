@@ -110,34 +110,50 @@ if uploaded_file:
             hide_index=True
         )
 
-        st.subheader("Vægtning pr. aktie")
+               st.subheader("Vægtning pr. aktie")
 
-weight_df = df.sort_values("Weight %", ascending=False).copy()
+        weight_df = df.sort_values("Weight %", ascending=False).copy()
 
-weight_df["Weight label"] = weight_df["Weight %"].apply(
-    lambda x: f"{x:.1%}".replace(".", ",")
-)
+        weight_df["Weight label"] = weight_df["Weight %"].apply(
+            lambda x: f"{x:.1%}".replace(".", ",")
+        )
 
-fig_weight = px.bar(
-    weight_df,
-    x="Ticker",
-    y="Weight %",
-    text="Weight label"
-)
+        fig_weight = px.bar(
+            weight_df,
+            x="Ticker",
+            y="Weight %",
+            text="Weight label"
+        )
 
-fig_weight.update_traces(
-    textposition="outside"
-)
+        fig_weight.update_traces(
+            textposition="outside"
+        )
 
-fig_weight.update_layout(
-    yaxis_tickformat=".0%",
-    xaxis_title="Aktie",
-    yaxis_title="Vægt",
-    uniformtext_minsize=10,
-    uniformtext_mode="show"
-)
+        fig_weight.update_layout(
+            yaxis_tickformat=".0%",
+            xaxis_title="Aktie",
+            yaxis_title="Vægt",
+            uniformtext_minsize=10,
+            uniformtext_mode="show"
+        )
 
-st.plotly_chart(fig_weight, use_container_width=True)
+        st.plotly_chart(fig_weight, use_container_width=True)
+
+        st.subheader("Sektorfordeling")
+
+        sector_df = (
+            df.groupby("Sektor", as_index=False)["Market value"]
+            .sum()
+            .sort_values("Market value", ascending=False)
+        )
+
+        fig_sector = px.pie(
+            sector_df,
+            names="Sektor",
+            values="Market value"
+        )
+
+        st.plotly_chart(fig_sector, use_container_width=True)
 
         st.subheader("Sektorfordeling")
 
