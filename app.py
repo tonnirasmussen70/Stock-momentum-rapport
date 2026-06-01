@@ -139,6 +139,136 @@ if uploaded_file:
 
         st.plotly_chart(fig_weight, use_container_width=True)
 
+        st.subheader("Rebalanceringsforslag")
+
+        rebalance_df = df.copy()
+
+        # Hvis Target weight mangler eller er tom, bruges equal weight som fallback
+        if "Target weight" not in rebalance_df.columns:
+            rebalance_df["Target weight"] = 1 / len(rebalance_df)
+
+        # Rens Target weight
+        rebalance_df["Target weight"] = rebalance_df["Target weight"].replace(
+            ["None", "none", "", "-", None],
+            pd.NA
+        )
+
+        # Hvis Target weight er angivet som fx 7,5 eller 7.5, tolkes det som %
+        rebalance_df["Target weight"] = pd.to_numeric(
+            rebalance_df["Target weight"],
+            errors="coerce"
+        )
+
+        # Hvis target weight er større end 1, antages det at være procent
+        rebalance_df["Target weight"] = rebalance_df["Target weight"].apply(
+            lambda x: x / 100 if pd.notna(x) and x > 1 else x
+        )
+
+        # Hvis der stadig mangler target, bruges equal weight
+        rebalance_df["Target weight"] = rebalance_df["Target weight"].fillna(
+            1 / len(rebalance_df)
+        )
+
+        # Normaliser target weights så de summerer til 100%
+        rebalance_df["Target weight"] = (
+            rebalance_df["Target weight"] / rebalance_df["Target weight"].sum()
+        )
+
+        # Beregninger
+        rebalance_df["Current weight"] = rebalance_df["Weight %"]
+        rebalance_df["Target value"] = rebalance_df["Target weight"] * total_value
+        rebalance_df["Trade DKK"] = rebalance_df["Target value"] - rebalance_df["Market value"]
+        rebalance_df["Change %"] = rebalance_df["Target weight"] - rebalance_df["Current weight"]
+
+        def get_recommendation(trade_value):
+            if trade_value > total_value * 0.01:
+                return "Øg"
+            elif trade_value < -total_value * 0.01:
+                return "Reducer"
+            else:
+                return "Hold"
+
+        rebalance_df["Anbef."] = rebalance_df["Trade DKK"].apply(get_recommendation)
+
+        # Yahoo ticker mapping
+        def yahoo_ticker(ticker):
+            try:
+                ticker = str(ticker)
+                mapping = {
+                    "XCSE": ".CO",
+                    "XSTO": ".ST",
+                    "XAMS": ".AS",
+                    "XETR": ".DE",
+                    "XNYSE": "",
+                    "XNAS": "",
+                    "NEOE": ".NE"
+                }
+
+                if ":" in ticker:
+                    symbol, exchange = ticker.split(":")
+                    return symbol + mapping.get(exchange, "")
+                return ticker
+            except Exception:
+                return ticker
+
+        rebalance_df["Yahoo"] = rebalance_df["Ticker"].apply(yahoo_ticker)
+
+        # Vælg kolonnenavn
+        name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
+
+        display_rebalance = rebalance_df[
+            [
+                name_col,
+                "Yahoo",
+                "Current weight",
+                "Target weight",
+                "Change %",
+                "Market value",
+                "Trade DKK",
+                "Anbef."
+            ]
+        ].copy()
+
+        display_rebalance = display_rebalance.rename(
+            columns={
+                name_col: "Instrument",
+                "Current weight": "Aktuel",
+                "Target weight": "Mål",
+                "Change %": "Ændring",
+                "Market value": "Eksponering",
+                "Trade DKK": "Handel"
+            }
+        )
+
+        def format_pct_display(value):
+            try:
+                return f"{float(value) * 100:.1f}%".replace(".", ",")
+            except Exception:
+                return value
+
+        def format_dkk_display(value):
+            try:
+                return f"{float(value):,.0f} kr.".replace(",", ".")
+            except Exception:
+                return value
+
+        for col in ["Aktuel", "Mål", "Ændring"]:
+            display_rebalance[col] = display_rebalance[col].apply(format_pct_display)
+
+        for col in ["Eksponering", "Handel"]:
+            display_rebalance[col] = display_rebalance[col].apply(format_dkk_display)
+
+        # Sortér efter største handelsbehov
+        display_rebalance["_sort"] = rebalance_df["Trade DKK"].abs().values
+        display_rebalance = display_rebalance.sort_values("_sort", ascending=False)
+        display_rebalance = display_rebalance.drop(columns="_sort")
+
+        st.dataframe(
+            display_rebalance,
+            use_container_width=True,
+            hide_index=True
+        )
+        
         st.subheader("Sektorfordeling")
 
         sector_df = (
