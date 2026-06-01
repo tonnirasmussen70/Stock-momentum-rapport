@@ -15,7 +15,7 @@ uploaded_file = st.file_uploader("Upload stock portfolio Excel-fil", type=["xlsx
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
 
-    required_cols = ["Ticker", "Navn", "Antal", "Valuta", "Købskurs", "Aktuel kurs", "Sektor", "Target weight"]
+    required_cols = ["Ticker", "Navn", "Antal", "Købskurs", "Aktuel kurs", "Sektor", "Target weight"]
 
     missing_cols = [col for col in required_cols if col not in df.columns]
 
