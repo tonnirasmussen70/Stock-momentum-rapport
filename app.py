@@ -43,6 +43,60 @@ else:
         st.stop()
 
 # ---------------------------------------------------
+# Indstillinger for momentumrotation
+# ---------------------------------------------------
+
+st.sidebar.header("Momentumrotation")
+
+rotation_strength = st.sidebar.selectbox(
+    "Rotationsstyrke",
+    ["Moderat", "Aggressiv", "Meget aggressiv"],
+    index=1,
+    help="Højere styrke betyder, at kapital flyttes hårdere mod de stærkeste momentumaktier."
+)
+
+rotation_power_map = {
+    "Moderat": 2.0,
+    "Aggressiv": 3.0,
+    "Meget aggressiv": 4.0
+}
+rotation_power = rotation_power_map[rotation_strength]
+
+max_weight = st.sidebar.slider(
+    "Maks. vægt pr. aktie",
+    min_value=0.05,
+    max_value=0.25,
+    value=0.14,
+    step=0.01,
+    format="%.0f%%"
+)
+
+nan_policy = st.sidebar.selectbox(
+    "Manglende momentumdata",
+    ["Reducer til minimum", "Behold nuværende vægt"],
+    index=0,
+    help="Aktier uden valide 1/3/6/12M data må ikke få Øg-anbefaling."
+)
+
+missing_data_weight = st.sidebar.slider(
+    "Minimumsvægt ved manglende data",
+    min_value=0.00,
+    max_value=0.05,
+    value=0.01,
+    step=0.005,
+    format="%.1f%%"
+)
+
+trade_threshold = st.sidebar.slider(
+    "Minimum handelssignal",
+    min_value=0.005,
+    max_value=0.05,
+    value=0.015,
+    step=0.005,
+    format="%.1f%%"
+)
+
+# ---------------------------------------------------
 # Kontrol af kolonner
 # ---------------------------------------------------
 
@@ -98,6 +152,8 @@ def format_dkk(value):
 
 def format_pct(value):
     try:
+        if pd.isna(value):
+            return "N/A"
         return f"{float(value) * 100:.1f}%".replace(".", ",")
     except Exception:
         return value
@@ -105,6 +161,8 @@ def format_pct(value):
 
 def format_pct_from_percent(value):
     try:
+        if pd.isna(value):
+            return "N/A"
         return f"{float(value):.1f}%".replace(".", ",")
     except Exception:
         return value
@@ -112,6 +170,8 @@ def format_pct_from_percent(value):
 
 def format_number(value):
     try:
+        if pd.isna(value):
+            return "N/A"
         return f"{float(value):.0f}"
     except Exception:
         return value
@@ -119,6 +179,8 @@ def format_number(value):
 
 def format_score(value):
     try:
+        if pd.isna(value):
+            return "N/A"
         return f"{float(value):.2f}".replace(".", ",")
     except Exception:
         return value
@@ -126,7 +188,18 @@ def format_score(value):
 
 def format_score_1(value):
     try:
+        if pd.isna(value):
+            return "N/A"
         return f"{float(value):.1f}".replace(".", ",")
+    except Exception:
+        return value
+
+
+def format_kr(value):
+    try:
+        if pd.isna(value):
+            return "N/A"
+        return f"{float(value):,.0f} kr.".replace(",", ".")
     except Exception:
         return value
 
@@ -137,13 +210,27 @@ def format_score_1(value):
 
 df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
 
-df["Market value"] = df["Beholdning"]
-df["Cost value"] = df["Market value"] / (1 + df["Gevinst"])
+df["Market value"] = pd.to_numeric(df["Beholdning"], errors="coerce").fillna(0)
+df["Gevinst"] = pd.to_numeric(df["Gevinst"], errors="coerce").fillna(0)
+
+# Hvis Gevinst ligger som procenttal, fx 12,5 i stedet for 0,125, normaliseres den.
+if df["Gevinst"].abs().median() > 2:
+    df["Gevinst"] = df["Gevinst"] / 100
+
+df["Cost value"] = np.where(
+    1 + df["Gevinst"] != 0,
+    df["Market value"] / (1 + df["Gevinst"]),
+    np.nan
+)
 df["Gain/Loss"] = df["Market value"] - df["Cost value"]
 df["Return %"] = df["Gain/Loss"] / df["Cost value"]
 df["Weight %"] = df["Market value"] / df["Market value"].sum()
 
 total_value = df["Market value"].sum()
+
+if total_value <= 0:
+    st.error("Porteføljeværdi er 0 eller ugyldig. Kontroller Beholdning-kolonnen.")
+    st.stop()
 
 # ---------------------------------------------------
 # Historiske kurser
@@ -156,13 +243,19 @@ def download_prices(tickers, period="13mo"):
         period=period,
         auto_adjust=True,
         progress=False,
-        group_by="column"
-    )["Close"]
+        group_by="column",
+        threads=True
+    )
+
+    if isinstance(price_data, pd.DataFrame) and "Close" in price_data.columns:
+        price_data = price_data["Close"]
 
     if isinstance(price_data, pd.Series):
-        price_data = price_data.to_frame(name=tickers[0])
+        first_name = tickers[0] if isinstance(tickers, list) and tickers else "Ticker"
+        price_data = price_data.to_frame(name=first_name)
 
-    price_data = price_data.dropna(how="all")
+    if isinstance(price_data, pd.DataFrame):
+        price_data = price_data.dropna(how="all")
 
     return price_data
 
@@ -172,40 +265,34 @@ def download_prices(tickers, period="13mo"):
 # ---------------------------------------------------
 
 def calculate_momentum(dataframe):
+    empty_cols = [
+        "Yahoo",
+        "MOM 1M",
+        "MOM 3M",
+        "MOM 6M",
+        "MOM 12M",
+        "Momentum raw",
+        "Momentum composite"
+    ]
+
     try:
         tickers = dataframe["Yahoo"].dropna().unique().tolist()
 
         if len(tickers) == 0:
-            return pd.DataFrame(columns=[
-                "Yahoo",
-                "MOM 1M",
-                "MOM 3M",
-                "MOM 6M",
-                "MOM 12M",
-                "Momentum composite"
-            ])
+            return pd.DataFrame(columns=empty_cols)
 
         price_data = download_prices(tickers, period="13mo")
 
-        if price_data.empty:
-            return pd.DataFrame(columns=[
-                "Yahoo",
-                "MOM 1M",
-                "MOM 3M",
-                "MOM 6M",
-                "MOM 12M",
-                "Momentum composite"
-            ])
+        if price_data is None or price_data.empty:
+            return pd.DataFrame(columns=empty_cols)
 
         price_data = price_data.ffill().dropna(how="all")
-
         latest = price_data.iloc[-1]
 
         def calc_return(days):
             if len(price_data) > days:
                 return latest / price_data.iloc[-days] - 1
-            else:
-                return np.nan
+            return pd.Series(np.nan, index=price_data.columns)
 
         momentum_df = pd.DataFrame(index=price_data.columns)
         momentum_df["MOM 1M"] = calc_return(21)
@@ -213,45 +300,42 @@ def calculate_momentum(dataframe):
         momentum_df["MOM 6M"] = calc_return(126)
         momentum_df["MOM 12M"] = calc_return(252)
 
-        # Vægtning efter momentumrapport-princip:
-        # 3M og 6M vægtes højest, 1M bruges som tidlig trend, 12M som langsigtet filter.
-        momentum_df["Momentum composite"] = (
-            momentum_df["MOM 1M"] * 0.15
+        # Momentum vægtning:
+        # 12M og 6M vægtes højest, fordi de bedst fanger den større trend.
+        # 1M og 3M bruges som trendvending / acceleration.
+        momentum_df["Momentum raw"] = (
+            momentum_df["MOM 1M"] * 0.10
             + momentum_df["MOM 3M"] * 0.25
             + momentum_df["MOM 6M"] * 0.30
-            + momentum_df["MOM 12M"] * 0.20
+            + momentum_df["MOM 12M"] * 0.35
         )
 
-        momentum_df = momentum_df.reset_index()
+        momentum_df["Momentum composite"] = momentum_df["Momentum raw"].copy()
 
-        # Robust navngivning af første kolonne, uanset om pandas/yfinance kalder den index, Date eller noget andet.
+        # Straf ved kortsigtet trendbrud.
+        momentum_df.loc[momentum_df["MOM 1M"] < 0, "Momentum composite"] *= 0.75
+        momentum_df.loc[momentum_df["MOM 3M"] < 0, "Momentum composite"] *= 0.65
+        momentum_df.loc[momentum_df["MOM 6M"] < 0, "Momentum composite"] *= 0.70
+
+        momentum_df = momentum_df.reset_index()
         first_col = momentum_df.columns[0]
         momentum_df = momentum_df.rename(columns={first_col: "Yahoo"})
 
-        return momentum_df
+        return momentum_df[empty_cols]
 
     except Exception:
-        return pd.DataFrame(columns=[
-            "Yahoo",
-            "MOM 1M",
-            "MOM 3M",
-            "MOM 6M",
-            "MOM 12M",
-            "Momentum composite"
-        ])
+        return pd.DataFrame(columns=empty_cols)
 
 
 momentum_df = calculate_momentum(df)
 
-# Robust fallback:
-# Hvis Yahoo/yfinance ikke returnerer en korrekt momentumtabel, oprettes en tom tabel
-# med de nødvendige kolonner, så app'en ikke crasher på merge.
 required_momentum_cols = [
     "Yahoo",
     "MOM 1M",
     "MOM 3M",
     "MOM 6M",
     "MOM 12M",
+    "Momentum raw",
     "Momentum composite"
 ]
 
@@ -263,16 +347,14 @@ for col in required_momentum_cols:
         momentum_df[col] = np.nan
 
 momentum_df = momentum_df[required_momentum_cols]
-
 df = df.merge(momentum_df, on="Yahoo", how="left")
 
-# Fallback hvis Yahoo ikke leverer data:
-# Brug Gevinst-kolonnen som midlertidig proxy, så app'en stadig virker.
-for col in ["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M", "Momentum composite"]:
+for col in ["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M", "Momentum raw", "Momentum composite"]:
     if col not in df.columns:
         df[col] = np.nan
 
-df["Momentum composite"] = df["Momentum composite"].fillna(df["Gevinst"])
+# Valide momentumdata kræver alle 1/3/6/12M afkast.
+df["Momentum data valid"] = df[["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]].notna().all(axis=1)
 
 # ---------------------------------------------------
 # Sharpe / Sortino
@@ -297,7 +379,6 @@ def calculate_sharpe_sortino(dataframe, period="1y", risk_free_rate=0.02):
         )
 
         weights = weights.reindex(daily_returns.columns).fillna(0)
-
         portfolio_returns = daily_returns.dot(weights)
 
         mean_daily_return = portfolio_returns.mean()
@@ -310,15 +391,8 @@ def calculate_sharpe_sortino(dataframe, period="1y", risk_free_rate=0.02):
         annual_volatility = daily_volatility * np.sqrt(252)
         annual_downside_volatility = downside_volatility * np.sqrt(252)
 
-        if annual_volatility == 0 or pd.isna(annual_volatility):
-            sharpe = None
-        else:
-            sharpe = (annual_return - risk_free_rate) / annual_volatility
-
-        if annual_downside_volatility == 0 or pd.isna(annual_downside_volatility):
-            sortino = None
-        else:
-            sortino = (annual_return - risk_free_rate) / annual_downside_volatility
+        sharpe = None if annual_volatility == 0 or pd.isna(annual_volatility) else (annual_return - risk_free_rate) / annual_volatility
+        sortino = None if annual_downside_volatility == 0 or pd.isna(annual_downside_volatility) else (annual_return - risk_free_rate) / annual_downside_volatility
 
         return sharpe, sortino
 
@@ -335,45 +409,35 @@ sharpe_score, sortino_score = calculate_sharpe_sortino(df)
 col1, col2, col3, col4 = st.columns(4)
 
 col1.metric("Porteføljeværdi", format_dkk(total_value))
-
-if sharpe_score is not None:
-    col2.metric("Sharpe score", format_score(sharpe_score))
-else:
-    col2.metric("Sharpe score", "N/A")
-
-if sortino_score is not None:
-    col3.metric("Sortino score", format_score(sortino_score))
-else:
-    col3.metric("Sortino score", "N/A")
-
+col2.metric("Sharpe score", format_score(sharpe_score) if sharpe_score is not None else "N/A")
+col3.metric("Sortino score", format_score(sortino_score) if sortino_score is not None else "N/A")
 col4.metric("Antal aktier", len(df))
 
 # ---------------------------------------------------
-# Momentum-lignende scoringmodel
+# Momentum-fokuseret scoringmodel
 # ---------------------------------------------------
 
 df["Current weight"] = df["Weight %"]
 
 
-def momentum_score(value):
-    try:
-        value = float(value)
+def momentum_score_from_row(row):
+    if not row["Momentum data valid"] or pd.isna(row["Momentum composite"]):
+        return 1
 
-        if value >= 0.25:
-            return 5
-        elif value >= 0.10:
-            return 4
-        elif value >= 0.00:
-            return 3
-        elif value >= -0.10:
-            return 2
-        else:
-            return 1
-    except Exception:
+    value = float(row["Momentum composite"])
+
+    if value >= 0.45:
+        return 5
+    elif value >= 0.25:
+        return 4
+    elif value >= 0.10:
+        return 3
+    elif value > 0:
         return 2
+    return 1
 
 
-df["Momentum score"] = df["Momentum composite"].apply(momentum_score)
+df["Momentum score"] = df.apply(momentum_score_from_row, axis=1)
 
 
 def concentration_risk(weight):
@@ -388,8 +452,7 @@ def concentration_risk(weight):
             return 3
         elif weight >= 0.04:
             return 2
-        else:
-            return 1
+        return 1
     except Exception:
         return 3
 
@@ -417,45 +480,147 @@ def stock_risk_score(ticker):
         return 5
     elif ticker in low_risk_tickers:
         return 2
-    else:
-        return 3
+    return 3
 
 
 df["Stock risk"] = df["Ticker"].apply(stock_risk_score)
 
-# Risiko-score:
-# Jo højere score, jo større risikobelastning.
+# Risiko-score: højere score = højere risiko.
 df["Risk score"] = (
-    df["Concentration risk"] * 0.50
+    df["Concentration risk"] * 0.45
     + df["Stock risk"] * 0.35
-    + (6 - df["Momentum score"]) * 0.15
+    + (6 - df["Momentum score"]) * 0.20
 )
 
-# Samlet score:
-# Momentum driver kapital mod stærke aktier.
-# Risiko trækker ned.
+# Investerbarhed: kun aktier med komplette momentumdata og positivt momentum kan få overvægt.
+df["Investable"] = (
+    df["Momentum data valid"]
+    & df["Momentum composite"].notna()
+    & (df["Momentum composite"] > 0)
+)
+
+# Allokeringsscore:
+# 1) momentum driver modellen
+# 2) risiko reducerer kapitalallokering
+# 3) score opløftes med power 2/3/4 for at undgå jævn fordeling
+risk_adjustment = (6 - df["Risk score"]).clip(lower=0.25) / 5
+trend_quality = np.where(
+    (df["MOM 1M"] > 0) & (df["MOM 3M"] > 0) & (df["MOM 6M"] > 0) & (df["MOM 12M"] > 0),
+    1.15,
+    np.where((df["MOM 3M"] > 0) & (df["MOM 6M"] > 0), 1.00, 0.70)
+)
+
+df["Allocation base"] = np.where(
+    df["Investable"],
+    df["Momentum composite"].clip(lower=0) * risk_adjustment * trend_quality,
+    0
+)
+
+df["Allocation score"] = np.where(
+    df["Allocation base"] > 0,
+    df["Allocation base"] ** rotation_power,
+    0
+)
+
+# Portfolio score bruges til visning. Den må ikke alene drive target weight.
 df["Portfolio score"] = (
-    df["Momentum score"] * 0.70
-    + (6 - df["Risk score"]) * 0.30
-)
+    df["Momentum score"] * 0.65
+    + (6 - df["Risk score"]) * 0.35
+).clip(lower=0.5)
 
-df["Portfolio score"] = df["Portfolio score"].clip(lower=0.5)
 
-df["Suggested weight"] = df["Portfolio score"] / df["Portfolio score"].sum()
+def cap_and_redistribute(score_series, cap):
+    """Normaliserer scores til vægte, capper maks. vægt og redistribuerer resten."""
+    scores = pd.Series(score_series).fillna(0).clip(lower=0)
+    weights = pd.Series(0.0, index=scores.index)
 
-min_weight = 0.02
-max_weight = 0.12
+    if scores.sum() <= 0:
+        return weights
 
-df["Suggested weight"] = df["Suggested weight"].clip(
-    lower=min_weight,
-    upper=max_weight
-)
+    remaining_index = scores.index[scores > 0].tolist()
+    remaining_weight = 1.0
+    capped = set()
 
+    for _ in range(20):
+        if not remaining_index or remaining_weight <= 0:
+            break
+
+        sub_scores = scores.loc[remaining_index]
+        if sub_scores.sum() <= 0:
+            break
+
+        tentative = sub_scores / sub_scores.sum() * remaining_weight
+        over_cap = tentative[tentative > cap]
+
+        if over_cap.empty:
+            weights.loc[remaining_index] = tentative
+            break
+
+        for idx in over_cap.index:
+            weights.loc[idx] = cap
+            capped.add(idx)
+
+        remaining_weight = 1.0 - weights.sum()
+        remaining_index = [idx for idx in remaining_index if idx not in capped]
+
+    # Sikkerhedsnormalisering hvis cap er for lav til antal positioner.
+    if weights.sum() > 0:
+        weights = weights / weights.sum()
+
+    return weights
+
+
+# Først reserveres vægt til aktier uden valide momentumdata, afhængigt af policy.
+missing_mask = ~df["Momentum data valid"]
+reserved_missing_weight = pd.Series(0.0, index=df.index)
+
+if nan_policy == "Behold nuværende vægt":
+    reserved_missing_weight.loc[missing_mask] = df.loc[missing_mask, "Current weight"]
+else:
+    reserved_missing_weight.loc[missing_mask] = missing_data_weight
+
+# Sikring mod at missing-data-reserven ikke overstiger 35% af porteføljen.
+if reserved_missing_weight.sum() > 0.35:
+    reserved_missing_weight = reserved_missing_weight / reserved_missing_weight.sum() * 0.35
+
+remaining_capital_weight = max(0.0, 1.0 - reserved_missing_weight.sum())
+
+valid_weights = cap_and_redistribute(df["Allocation score"], max_weight)
+df["Suggested weight"] = reserved_missing_weight + valid_weights * remaining_capital_weight
+
+# Hvis ingen aktier er investerbare, beholdes nuværende portefølje for ikke at give meningsløse signaler.
+if df["Suggested weight"].sum() <= 0:
+    df["Suggested weight"] = df["Current weight"]
+else:
+    df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
+
+# Aktier uden valide data må aldrig få højere vægt end nuværende vægt.
+no_data_increase = (~df["Momentum data valid"]) & (df["Suggested weight"] > df["Current weight"])
+df.loc[no_data_increase, "Suggested weight"] = df.loc[no_data_increase, "Current weight"]
+
+# Normaliser igen efter datakontrol.
 df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
 
 df["Suggested value"] = df["Suggested weight"] * total_value
 df["Trade DKK"] = df["Suggested value"] - df["Market value"]
 df["Weight change"] = df["Suggested weight"] - df["Current weight"]
+
+
+def priority_bucket(row):
+    if not row["Momentum data valid"]:
+        return "Datatjek"
+    if row["Momentum composite"] <= 0:
+        return "Negativ trend"
+    if row["Momentum score"] >= 5 and row["Risk score"] <= 3.0:
+        return "Top momentum"
+    if row["Momentum score"] >= 4:
+        return "Stærk"
+    if row["Momentum score"] >= 3:
+        return "Neutral+"
+    return "Svag"
+
+
+df["Prioritet"] = df.apply(priority_bucket, axis=1)
 
 # ---------------------------------------------------
 # Porteføljeoversigt
@@ -490,7 +655,12 @@ columns_to_hide = [
     "Suggested value",
     "Trade DKK",
     "Weight change",
-    "Target weight"
+    "Target weight",
+    "Investable",
+    "Allocation base",
+    "Allocation score",
+    "Momentum data valid",
+    "Momentum raw"
 ]
 
 display_df = display_df.drop(
@@ -509,25 +679,18 @@ preferred_order = [
     "Gain/Loss",
     "Return %",
     "Valuta",
-    "Sektor"
-
+    "Sektor",
+    "Prioritet"
 ]
 
 existing_cols = [col for col in preferred_order if col in display_df.columns]
 display_df = display_df[existing_cols]
-
-if "Momentum composite" in display_df.columns:
-    display_df["Momentum composite"] = display_df["Momentum composite"].apply(format_pct)
-
-if "Momentum score" in display_df.columns:
-    display_df["Momentum score"] = display_df["Momentum score"].apply(format_score_1)
 
 st.dataframe(
     display_df,
     use_container_width=True,
     hide_index=True,
     height=550
-
 )
 
 # ---------------------------------------------------
@@ -537,10 +700,7 @@ st.dataframe(
 st.subheader("Vægtning pr. aktie")
 
 weight_df = df.sort_values("Weight %", ascending=False).copy()
-
-weight_df["Weight label"] = weight_df["Weight %"].apply(
-    lambda x: f"{x:.1%}".replace(".", ",")
-)
+weight_df["Weight label"] = weight_df["Weight %"].apply(lambda x: f"{x:.1%}".replace(".", ","))
 
 fig_weight = px.bar(
     weight_df,
@@ -549,10 +709,7 @@ fig_weight = px.bar(
     text="Weight label"
 )
 
-fig_weight.update_traces(
-    textposition="outside"
-)
-
+fig_weight.update_traces(textposition="outside")
 fig_weight.update_layout(
     yaxis_tickformat=".0%",
     xaxis_title="Aktie",
@@ -581,7 +738,9 @@ momentum_view = momentum_view[
         "MOM 6M",
         "MOM 12M",
         "Momentum composite",
-        "Momentum score"
+        "Momentum score",
+        "Momentum data valid",
+        "Prioritet"
     ]
 ].copy()
 
@@ -589,18 +748,19 @@ momentum_view = momentum_view.rename(
     columns={
         name_col: "Instrument",
         "Momentum composite": "Momentum samlet",
-        "Momentum score": "Score"
+        "Momentum score": "Score",
+        "Momentum data valid": "Data OK"
     }
 )
 
-momentum_view = momentum_view.sort_values("Momentum samlet", ascending=False)
-
+momentum_view = momentum_view.sort_values("Momentum samlet", ascending=False, na_position="last")
 momentum_display = momentum_view.copy()
 
 for col in ["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M", "Momentum samlet"]:
     momentum_display[col] = momentum_display[col].apply(format_pct)
 
 momentum_display["Score"] = momentum_display["Score"].apply(format_score_1)
+momentum_display["Data OK"] = momentum_display["Data OK"].map({True: "Ja", False: "Nej"})
 
 st.dataframe(
     momentum_display,
@@ -611,19 +771,18 @@ st.dataframe(
 
 momentum_chart_df = momentum_view.copy()
 momentum_chart_df["Momentum samlet"] = momentum_chart_df["Momentum samlet"] * 100
+momentum_chart_df = momentum_chart_df.dropna(subset=["Momentum samlet"])
 
 fig_momentum = px.bar(
     momentum_chart_df,
     x="Instrument",
     y="Momentum samlet",
     text=momentum_chart_df["Momentum samlet"].apply(lambda x: f"{x:.1f}%".replace(".", ",")),
-    title="Samlet momentum-score baseret på 1/3/6/12M"
+    color="Prioritet",
+    title="Samlet momentum baseret på 1/3/6/12M"
 )
 
-fig_momentum.update_traces(
-    textposition="outside"
-)
-
+fig_momentum.update_traces(textposition="outside")
 fig_momentum.update_layout(
     xaxis_title="Aktie",
     yaxis_title="Momentum samlet (%)",
@@ -640,6 +799,10 @@ st.plotly_chart(fig_momentum, use_container_width=True)
 
 st.subheader("Rebalanceringsforslag")
 
+st.caption(
+    "Modellen bruger momentumrotation: stærke 1/3/6/12M trends får kapital, svage/negative trends reduceres, og aktier uden valide data kan ikke få Øg-anbefaling."
+)
+
 rebalance_df = df.copy()
 
 
@@ -647,17 +810,27 @@ def recommendation(row):
     trade = row["Trade DKK"]
     weight_change = row["Weight change"]
     momentum = row["Momentum score"]
+    data_ok = row["Momentum data valid"]
+    investable = row["Investable"]
 
-    if trade > total_value * 0.015 and weight_change > 0 and momentum >= 3:
-        return "Øg"
-    elif trade < -total_value * 0.015 and weight_change < 0:
-        return "Reducer"
-    else:
+    if not data_ok:
+        if trade < -total_value * trade_threshold:
+            return "Reducer / datatjek"
+        return "Hold / datatjek"
+
+    if not investable:
+        if trade < -total_value * trade_threshold:
+            return "Reducer"
         return "Hold"
+
+    if trade > total_value * trade_threshold and weight_change > 0 and momentum >= 3:
+        return "Øg"
+    elif trade < -total_value * trade_threshold and weight_change < 0:
+        return "Reducer"
+    return "Hold"
 
 
 rebalance_df["Anbef."] = rebalance_df.apply(recommendation, axis=1)
-
 name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
 
 display_rebalance = rebalance_df[
@@ -676,6 +849,7 @@ display_rebalance = rebalance_df[
         "Momentum score",
         "Risk score",
         "Portfolio score",
+        "Prioritet",
         "Anbef."
     ]
 ].copy()
@@ -698,18 +872,14 @@ for col in ["Aktuel", "Forslag", "Ændring", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 
     display_rebalance[col] = display_rebalance[col].apply(format_pct)
 
 for col in ["Eksponering", "Handel"]:
-    display_rebalance[col] = display_rebalance[col].apply(
-        lambda x: f"{float(x):,.0f} kr.".replace(",", ".")
-    )
+    display_rebalance[col] = display_rebalance[col].apply(format_kr)
 
 for col in ["Momentum", "Risiko", "Score"]:
-    display_rebalance[col] = display_rebalance[col].apply(
-        lambda x: f"{float(x):.1f}".replace(".", ",")
-    )
+    display_rebalance[col] = display_rebalance[col].apply(format_score_1)
 
-display_rebalance["_sort"] = rebalance_df["Trade DKK"].abs().values
-display_rebalance = display_rebalance.sort_values("_sort", ascending=False)
-display_rebalance = display_rebalance.drop(columns="_sort")
+# Sortér efter anbefalet køb først og derefter reduktioner.
+display_rebalance["_sort"] = rebalance_df["Suggested weight"].values
+display_rebalance = display_rebalance.sort_values("_sort", ascending=False).drop(columns="_sort")
 
 st.dataframe(
     display_rebalance,
@@ -722,11 +892,9 @@ st.dataframe(
 # Rebalanceringsgraf
 # ---------------------------------------------------
 
-st.subheader("Nuværende vægt vs. foreslået allokering")
+st.subheader("Nuværende vægt vs. foreslået momentumallokering")
 
-allocation_chart_df = rebalance_df.copy()
-
-allocation_chart_df = allocation_chart_df[
+allocation_chart_df = rebalance_df[
     [
         name_col,
         "Current weight",
@@ -742,11 +910,7 @@ allocation_chart_df = allocation_chart_df.rename(
     }
 )
 
-allocation_chart_df = allocation_chart_df.sort_values(
-    "Nuværende",
-    ascending=False
-)
-
+allocation_chart_df = allocation_chart_df.sort_values("Forslag", ascending=False)
 allocation_chart_df["Nuværende"] = allocation_chart_df["Nuværende"] * 100
 allocation_chart_df["Forslag"] = allocation_chart_df["Forslag"] * 100
 
@@ -763,16 +927,11 @@ fig_allocation = px.bar(
     y="Porteføljevægt",
     color="Type",
     barmode="group",
-    text=allocation_long_df["Porteføljevægt"].apply(
-        lambda x: f"{x:.1f}%".replace(".", ",")
-    ),
-    title="Nuværende vægt vs. foreslået allokering"
+    text=allocation_long_df["Porteføljevægt"].apply(lambda x: f"{x:.1f}%".replace(".", ",")),
+    title="Nuværende vægt vs. foreslået momentumallokering"
 )
 
-fig_allocation.update_traces(
-    textposition="outside"
-)
-
+fig_allocation.update_traces(textposition="outside")
 fig_allocation.update_layout(
     xaxis_title="Aktie",
     yaxis_title="Porteføljevægt (%)",
@@ -793,9 +952,7 @@ col_buy, col_reduce = st.columns(2)
 with col_buy:
     st.subheader("Top buys")
 
-    top_buys = display_rebalance[
-        display_rebalance["Anbef."] == "Øg"
-    ].head(5)
+    top_buys = display_rebalance[display_rebalance["Anbef."] == "Øg"].head(5)
 
     st.dataframe(
         top_buys,
@@ -806,9 +963,7 @@ with col_buy:
 with col_reduce:
     st.subheader("Top reductions")
 
-    top_reductions = display_rebalance[
-        display_rebalance["Anbef."] == "Reducer"
-    ].head(5)
+    top_reductions = display_rebalance[display_rebalance["Anbef."].str.contains("Reducer", na=False)].head(5)
 
     st.dataframe(
         top_reductions,
@@ -869,7 +1024,8 @@ fig_heatmap = px.imshow(
     ],
     y=heatmap_df["Instrument"],
     aspect="auto",
-    text_auto=".2f"
+    text_auto=".2f",
+    color_continuous_scale="RdYlGn"
 )
 
 fig_heatmap.update_layout(
