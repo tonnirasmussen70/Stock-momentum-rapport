@@ -514,8 +514,7 @@ preferred_order = [
 ]
 
 existing_cols = [col for col in preferred_order if col in display_df.columns]
-other_cols = [col for col in display_df.columns if col not in existing_cols]
-display_df = display_df[existing_cols + other_cols]
+display_df = display_df[existing_cols]
 
 if "Momentum composite" in display_df.columns:
     display_df["Momentum composite"] = display_df["Momentum composite"].apply(format_pct)
