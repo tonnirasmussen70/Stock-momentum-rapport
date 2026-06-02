@@ -912,26 +912,27 @@ def recommendation(row):
 rebalance_df["Anbef."] = rebalance_df.apply(recommendation, axis=1)
 name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
 
-display_rebalance = rebalance_df[
-    [
-        name_col,
-        "Yahoo",
-        "Current weight",
-        "Suggested weight",
-        "Weight change",
-        "Market value",
-        "Trade DKK",
-        "MOM 1M",
-        "MOM 3M",
-        "MOM 6M",
-        "MOM 12M",
-        "Momentum score",
-        "Risk score",
-        "Portfolio score",
-        "Prioritet",
-        "Anbef."
-    ]
-].copy()
+rebal_cols = [
+    name_col,
+    "Yahoo",
+    "Current weight",
+    "Suggested weight",
+    "Weight change",
+    "Market value",
+    "Trade DKK",
+    "MOM 1M",
+    "MOM 3M",
+    "MOM 6M",
+    "MOM 12M",
+    "Momentum score",
+    "Risk score",
+    "Portfolio score",
+    "Anbef.",
+]
+
+rebal_cols = [c for c in rebal_cols if c in rebalance_df.columns]
+
+display_rebalance = rebalance_df[rebal_cols].copy()
 
 display_rebalance = display_rebalance.rename(
     columns={
