@@ -500,7 +500,6 @@ display_df = display_df.drop(
 
 preferred_order = [
     "Navn",
-    "Ticker",
     "Weight %",
     "Antal",
     "Købskurs",
@@ -509,14 +508,9 @@ preferred_order = [
     "Gevinst",
     "Gain/Loss",
     "Return %",
-    "MOM 1M",
-    "MOM 3M",
-    "MOM 6M",
-    "MOM 12M",
-    "Momentum composite",
-    "Momentum score",
     "Valuta",
     "Sektor"
+
 ]
 
 existing_cols = [col for col in preferred_order if col in display_df.columns]
