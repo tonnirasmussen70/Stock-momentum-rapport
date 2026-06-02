@@ -809,14 +809,42 @@ if "Momentum samlet" in momentum_chart_df.columns:
 
     chart_x = "Instrument" if "Instrument" in momentum_chart_df.columns else "Ticker"
 
+    momentum_chart_df = momentum_view.copy()
+
+if "Momentum samlet" in momentum_chart_df.columns:
+    momentum_chart_df["Momentum samlet"] = pd.to_numeric(
+        momentum_chart_df["Momentum samlet"],
+        errors="coerce"
+    )
+
+    chart_x = "Instrument" if "Instrument" in momentum_chart_df.columns else "Ticker"
+
+    momentum_chart_df = momentum_chart_df.dropna(subset=["Momentum samlet"]).copy()
+
+    momentum_chart_df["Label"] = momentum_chart_df["Momentum samlet"].apply(
+        lambda x: f"{x:.1%}".replace(".", ",") if pd.notnull(x) else ""
+    )
+
     fig_momentum = px.bar(
-        momentum_chart_df.dropna(subset=["Momentum samlet"]),
+        momentum_chart_df,
         x=chart_x,
         y="Momentum samlet",
-        text=momentum_chart_df["Momentum samlet"].apply(
-            lambda x: f"{x:.1%}".replace(".", ",") if pd.notnull(x) else ""
-        ),
+        text="Label",
         title="Samlet momentum baseret på 1/3/6/12M"
+    )
+
+    fig_momentum.update_traces(textposition="outside")
+
+    fig_momentum.update_layout(
+        xaxis_title="Aktie",
+        yaxis_title="Momentum samlet",
+        yaxis_tickformat=".0%",
+        xaxis_tickangle=-45,
+    )
+
+    st.plotly_chart(fig_momentum, use_container_width=True)
+else:
+    st.warning("Momentum samlet mangler og grafen kan derfor ikke vises.")
     )
 
     fig_momentum.update_traces(textposition="outside")
