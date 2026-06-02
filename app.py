@@ -526,7 +526,7 @@ st.dataframe(
     display_df,
     use_container_width=True,
     hide_index=True,
-    height=500
+    height=550
 
 )
 
