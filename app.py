@@ -606,6 +606,7 @@ st.dataframe(
     momentum_display,
     use_container_width=True,
     hide_index=True
+    height=550
 )
 
 momentum_chart_df = momentum_view.copy()
