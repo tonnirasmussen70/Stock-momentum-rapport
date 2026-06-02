@@ -609,18 +609,42 @@ df["Weight change"] = df["Suggested weight"] - df["Current weight"]
 def priority_bucket(row):
     if not row["Momentum data valid"]:
         return "Datatjek"
+
+    mom_1m = row.get("MOM 1M", np.nan)
+    mom_3m = row.get("MOM 3M", np.nan)
+    mom_6m = row.get("MOM 6M", np.nan)
+    mom_12m = row.get("MOM 12M", np.nan)
+
+    # Hard gate: negativ 1M må aldrig være Top momentum
+    if pd.notnull(mom_1m) and mom_1m < 0:
+        if (
+            pd.notnull(mom_6m)
+            and pd.notnull(mom_12m)
+            and mom_6m > 0
+            and mom_12m > 0
+        ):
+            return "Momentum weakening"
+        return "Negativ trend"
+
     if row["Momentum composite"] <= 0:
         return "Negativ trend"
-    if row["Momentum score"] >= 5 and row["Risk score"] <= 3.0:
+
+    # Top momentum kræver positiv 1M + høj score + acceptabel risiko
+    if (
+        pd.notnull(mom_1m)
+        and mom_1m > 0
+        and row["Momentum score"] >= 5
+        and row["Risk score"] <= 3.0
+    ):
         return "Top momentum"
+
     if row["Momentum score"] >= 4:
         return "Stærk"
+
     if row["Momentum score"] >= 3:
         return "Neutral+"
+
     return "Svag"
-
-
-df["Prioritet"] = df.apply(priority_bucket, axis=1)
 
 # ---------------------------------------------------
 # Porteføljeoversigt
