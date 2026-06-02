@@ -844,7 +844,7 @@ if "Momentum samlet" in momentum_chart_df.columns:
 
     st.plotly_chart(fig_momentum, use_container_width=True)
 else:
-    st.warning("Momentum samlet mangler og grafen kan derfor ikke vises.")
+    st.warning("Momentum samlet mangler og grafen kan derfor ikke vises."
     )
 
     fig_momentum.update_traces(textposition="outside")
