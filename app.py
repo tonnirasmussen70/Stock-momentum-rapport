@@ -658,11 +658,11 @@ for col in ["Købskurs", "Aktuel kurs"]:
     if col in display_df.columns:
         display_df[col] = display_df[col].apply(format_number)
 
-for col in ["Beholdning", "Gain/Loss"]:
+for col in ["Beholdning", "Gevinst", "Gain/Loss"]:
     if col in display_df.columns:
         display_df[col] = display_df[col].apply(format_dkk)
 
-for col in ["Gevinst", "Return %", "Weight %", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]:
+for col in ["Return %", "Weight %", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]:
     if col in display_df.columns:
         display_df[col] = display_df[col].apply(format_pct)
 
