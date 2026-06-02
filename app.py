@@ -857,7 +857,7 @@ else:
     )
 
     st.plotly_chart(fig_momentum, use_container_width=True)
-else:
+
     st.warning("Momentum samlet mangler og grafen kan derfor ikke vises.")
 
 
