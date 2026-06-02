@@ -714,7 +714,8 @@ display_rebalance = display_rebalance.drop(columns="_sort")
 st.dataframe(
     display_rebalance,
     use_container_width=True,
-    hide_index=True
+    hide_index=True,
+    height=550
 )
 
 # ---------------------------------------------------
