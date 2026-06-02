@@ -605,7 +605,7 @@ momentum_display["Score"] = momentum_display["Score"].apply(format_score_1)
 st.dataframe(
     momentum_display,
     use_container_width=True,
-    hide_index=True
+    hide_index=True,
     height=550
 )
 
