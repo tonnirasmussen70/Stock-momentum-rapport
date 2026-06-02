@@ -699,9 +699,7 @@ preferred_order = [
     "Købskurs",
     "Aktuel kurs",
     "Beholdning",
-    "Gevinst",
     "Gain/Loss",
-    "Return %",
     "Valuta",
     "Sektor",
     "Prioritet"
