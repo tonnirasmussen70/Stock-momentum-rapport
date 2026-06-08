@@ -751,19 +751,16 @@ st.plotly_chart(fig_weight, use_container_width=True)
 st.subheader("Momentum 1/3/6/12 måneder")
 
 momentum_view = df.copy()
-name_col = "Navn" if "Navn" in momentum_view.columns else "Ticker"
-
-momentum_cols = [
-    "Navn",
+[
+    name_col,
     "Ticker",
+    "MOM 1W",
     "MOM 1M",
     "MOM 3M",
     "MOM 6M",
     "MOM 12M",
     "Momentum composite",
-    "Momentum score",
-    "Momentum data valid",
-    "Prioritet",
+    "Momentum score"
 ]
 
 momentum_cols = [c for c in momentum_cols if c in momentum_view.columns]
