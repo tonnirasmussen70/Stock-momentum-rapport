@@ -305,7 +305,8 @@ def calculate_momentum(dataframe):
         # 12M og 6M vægtes højest, fordi de bedst fanger den større trend.
         # 1M og 3M bruges som trendvending / acceleration.
         momentum_df["Momentum raw"] = (
-            momentum_df["MOM 1M"] * 0.10
+           momentum_df["MOM 1W"] * 0.05
+            + momentum_df["MOM 1M"] * 0.10
             + momentum_df["MOM 3M"] * 0.25
             + momentum_df["MOM 6M"] * 0.30
             + momentum_df["MOM 12M"] * 0.35
