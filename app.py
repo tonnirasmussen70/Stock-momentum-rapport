@@ -295,6 +295,7 @@ def calculate_momentum(dataframe):
             return pd.Series(np.nan, index=price_data.columns)
 
         momentum_df = pd.DataFrame(index=price_data.columns)
+        momentum_df["MOM 1W"] = calc_return(5)
         momentum_df["MOM 1M"] = calc_return(21)
         momentum_df["MOM 3M"] = calc_return(63)
         momentum_df["MOM 6M"] = calc_return(126)
@@ -310,12 +311,13 @@ def calculate_momentum(dataframe):
             + momentum_df["MOM 12M"] * 0.35
         )
 
-        momentum_df["Momentum composite"] = momentum_df["Momentum raw"].copy()
-
-        # Straf ved kortsigtet trendbrud.
-        momentum_df.loc[momentum_df["MOM 1M"] < 0, "Momentum composite"] *= 0.75
-        momentum_df.loc[momentum_df["MOM 3M"] < 0, "Momentum composite"] *= 0.65
-        momentum_df.loc[momentum_df["MOM 6M"] < 0, "Momentum composite"] *= 0.70
+        momentum_df["Momentum composite"] = (
+    momentum_df["MOM 1W"] * 0.10
+    + momentum_df["MOM 1M"] * 0.15
+    + momentum_df["MOM 3M"] * 0.25
+    + momentum_df["MOM 6M"] * 0.30
+    + momentum_df["MOM 12M"] * 0.20
+)
 
         momentum_df = momentum_df.reset_index()
         first_col = momentum_df.columns[0]
