@@ -1,1134 +1,651 @@
-import streamlit as st
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
 import plotly.express as px
-import yfinance as yf
+import streamlit as st
 
-st.set_page_config(
-    page_title="Stock Portfolio Dashboard",
-    page_icon="📈",
-    layout="wide"
-)
+from modules.data_loader import load_excel_file, standardize_portfolio
+from modules.market_data import fetch_prices
+from modules.momentum import calculate_momentum
+from modules.stop_loss import add_stop_loss
+from modules.reporting import create_pdf
 
-st.title("📈 Stock Portfolio Dashboard")
+st.set_page_config(page_title="Momentum Dashboard", layout="wide")
 
 # ---------------------------------------------------
-# Datakilde
+# Rebalanceringsparametre
 # ---------------------------------------------------
+SECTOR_MAX = 0.20   # 20% max vægt pr. sektor
+SECTOR_MIN = 0.03   # 3% minimum hvis sektoren stadig er aktiv
+POSITION_MAX = 0.20 # 20% max vægt pr. enkeltposition
 
-st.sidebar.header("Datakilde")
+st.title("Momentum Dashboard")
+st.caption("Browserbaseret ETF/aktie-dashboard med momentum, Sharpe, Sortino, drawdown og stop-loss forslag")
 
-data_mode = st.sidebar.radio(
-    "Vælg datakilde",
-    ["Automatisk fra repository", "Manuel upload"]
-)
-
-if data_mode == "Manuel upload":
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload AI_Stock.xlsx",
-        type=["xlsx"]
+with st.sidebar:
+    st.header("Upload portefølje")
+    uploaded_files = st.file_uploader(
+        "Upload AI_ETF.xlsx / AI_Stock.xlsx / AI_portfolio.xlsx",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
     )
+    period = st.selectbox("Historik til beregning", ["12mo", "18mo", "24mo", "36mo"], index=1)
+    st.divider()
+    st.write("**Signalmodel**")
+    st.caption("Øg / Hold / Reducer baseres på risikojusteret momentum og 1M/3M trend.")
 
-    if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file)
-    else:
-        st.warning("Upload en Excel-fil for at starte.")
-        st.stop()
-else:
-    try:
-        df = pd.read_excel("AI_Stock.xlsx")
-    except Exception as e:
-        st.error("Kunne ikke finde eller læse AI_Stock.xlsx i repository.")
-        st.exception(e)
-        st.stop()
 
-# ---------------------------------------------------
-# Indstillinger for momentumrotation
-# ---------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_portfolio_from_uploads(files):
+    frames = []
+    for f in files:
+        raw = load_excel_file(f)
+        frames.append(standardize_portfolio(raw, default_source=f.name))
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    total = combined["Exposure"].sum(skipna=True)
+    combined["Weight"] = combined["Exposure"] / total if total and total > 0 else None
+    return combined
 
-st.sidebar.header("Momentumrotation")
 
-rotation_strength = st.sidebar.selectbox(
-    "Rotationsstyrke",
-    ["Moderat", "Aggressiv", "Meget aggressiv"],
-    index=1,
-    help="Højere styrke betyder, at kapital flyttes hårdere mod de stærkeste momentumaktier."
-)
+if not uploaded_files:
+    st.info("Upload én eller flere Excel-filer i venstre side for at starte analysen.")
+    st.markdown(
+        """
+        **Forventede kolonner**  
+        Appen forsøger automatisk at finde kolonner som ETF_Navn/navn, ISIN, ticker/symbol,
+        aktuel beholdning/eksponering/markedsværdi, sektor, antal og kurs.
 
-rotation_power_map = {
-    "Moderat": 2.0,
-    "Aggressiv": 3.0,
-    "Meget aggressiv": 4.0
-}
-rotation_power = rotation_power_map[rotation_strength]
-
-max_weight = st.sidebar.slider(
-    "Maks. vægt pr. aktie",
-    min_value=0.05,
-    max_value=0.25,
-    value=0.14,
-    step=0.01,
-    format="%.0f%%"
-)
-
-nan_policy = st.sidebar.selectbox(
-    "Manglende momentumdata",
-    ["Reducer til minimum", "Behold nuværende vægt"],
-    index=0,
-    help="Aktier uden valide 1/3/6/12M data må ikke få Øg-anbefaling."
-)
-
-missing_data_weight = st.sidebar.slider(
-    "Minimumsvægt ved manglende data",
-    min_value=0.00,
-    max_value=0.05,
-    value=0.01,
-    step=0.005,
-    format="%.1f%%"
-)
-
-trade_threshold = st.sidebar.slider(
-    "Minimum handelssignal",
-    min_value=0.005,
-    max_value=0.05,
-    value=0.015,
-    step=0.005,
-    format="%.1f%%"
-)
-
-# ---------------------------------------------------
-# Kontrol af kolonner
-# ---------------------------------------------------
-
-required_cols = [
-    "Ticker",
-    "Antal",
-    "Købskurs",
-    "Aktuel kurs",
-    "Beholdning",
-    "Gevinst",
-    "Sektor"
-]
-
-missing_cols = [col for col in required_cols if col not in df.columns]
-
-if missing_cols:
-    st.error(f"Mangler kolonner: {missing_cols}")
+        **Vigtigt**  
+        ISIN bruges som stabil identifikation. Ticker bruges kun til kursdata, hvis den findes.
+        """
+    )
     st.stop()
 
-# ---------------------------------------------------
-# Hjælpefunktioner
-# ---------------------------------------------------
-
-def yahoo_ticker(ticker):
-    try:
-        ticker = str(ticker).strip()
-        mapping = {
-            "XCSE": ".CO",
-            "XSTO": ".ST",
-            "XAMS": ".AS",
-            "XETR": ".DE",
-            "XNYS": "",
-            "XNAS": "",
-            "NEOE": ".NE"
-        }
-
-        if ":" in ticker:
-            symbol, exchange = ticker.split(":")
-            return symbol.strip() + mapping.get(exchange.strip(), "")
-
-        return ticker
-
-    except Exception:
-        return ticker
-
-
-def format_dkk(value):
-    try:
-        return f"{float(value):,.0f}".replace(",", ".")
-    except Exception:
-        return value
-
-
-def format_pct(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value) * 100:.1f}%".replace(".", ",")
-    except Exception:
-        return value
-
-
-def format_pct_from_percent(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value):.1f}%".replace(".", ",")
-    except Exception:
-        return value
-
-
-def format_number(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value):.0f}"
-    except Exception:
-        return value
-
-
-def format_score(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value):.2f}".replace(".", ",")
-    except Exception:
-        return value
-
-
-def format_score_1(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value):.1f}".replace(".", ",")
-    except Exception:
-        return value
-
-
-def format_kr(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value):,.0f} kr.".replace(",", ".")
-    except Exception:
-        return value
-
-
-# ---------------------------------------------------
-# Grunddata og beregninger
-# ---------------------------------------------------
-
-df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
-
-df["Market value"] = pd.to_numeric(df["Beholdning"], errors="coerce").fillna(0)
-df["Gevinst"] = pd.to_numeric(df["Gevinst"], errors="coerce").fillna(0)
-
-# Hvis Gevinst ligger som procenttal, fx 12,5 i stedet for 0,125, normaliseres den.
-if df["Gevinst"].abs().median() > 2:
-    df["Gevinst"] = df["Gevinst"] / 100
-
-df["Cost value"] = np.where(
-    1 + df["Gevinst"] != 0,
-    df["Market value"] / (1 + df["Gevinst"]),
-    np.nan
-)
-df["Gain/Loss"] = df["Market value"] - df["Cost value"]
-df["Return %"] = df["Gain/Loss"] / df["Cost value"]
-df["Weight %"] = df["Market value"] / df["Market value"].sum()
-
-total_value = df["Market value"].sum()
-
-if total_value <= 0:
-    st.error("Porteføljeværdi er 0 eller ugyldig. Kontroller Beholdning-kolonnen.")
+try:
+    portfolio = load_portfolio_from_uploads(uploaded_files)
+except Exception as exc:
+    st.error(f"Datafejl: {exc}")
     st.stop()
 
-# ---------------------------------------------------
-# Historiske kurser
-# ---------------------------------------------------
+if portfolio.empty:
+    st.warning("Jeg kunne ikke læse porteføljen. Tjek at filen indeholder ETF_Navn, ISIN eller ticker.")
+    st.stop()
 
-@st.cache_data(ttl=3600)
-def download_prices(tickers, period="13mo"):
-    price_data = yf.download(
-        tickers,
-        period=period,
-        auto_adjust=True,
-        progress=False,
-        group_by="column",
-        threads=True
+st.subheader("Porteføljeinput")
+
+input_cols = ["ETF_Navn", "Quantity", "InputPrice", "LastPrice", "Exposure", "Weight", "Sector"]
+input_cols = [c for c in input_cols if c in portfolio.columns]
+
+portfolio_display = portfolio[input_cols].copy()
+
+if "Exposure" in portfolio_display.columns:
+    portfolio_display["Exposure"] = portfolio_display["Exposure"].apply(
+        lambda x: f"{x:,.0f} kr".replace(",", ".") if pd.notnull(x) else ""
     )
 
-    if isinstance(price_data, pd.DataFrame) and "Close" in price_data.columns:
-        price_data = price_data["Close"]
+if "Weight" in portfolio_display.columns:
+    portfolio_display["Weight"] = portfolio_display["Weight"].apply(
+        lambda x: f"{x:.2%}" if pd.notnull(x) else ""
+    )
 
-    if isinstance(price_data, pd.Series):
-        first_name = tickers[0] if isinstance(tickers, list) and tickers else "Ticker"
-        price_data = price_data.to_frame(name=first_name)
+st.dataframe(
+    zebra_table(portfolio_display),
+    use_container_width=True,
+    hide_index=True,
+    height=auto_height(portfolio_display),
+)
 
-    if isinstance(price_data, pd.DataFrame):
-        price_data = price_data.dropna(how="all")
+# Kursdata hentes ud fra Ticker-kolonnen. Hvis Ticker mangler, falder appen tilbage til ISIN,
+# men det kræver at market_data.py kan mappe ISIN til et gyldigt kurs-symbol.
+tickers = sorted(portfolio["Ticker"].dropna().astype(str).unique().tolist())
 
-    return price_data
 
+@st.cache_data(show_spinner=True)
+def get_prices(tickers, period):
+    return fetch_prices(tickers, period=period)
 
-# ---------------------------------------------------
-# Momentum 1/3/6/12 måneder
-# ---------------------------------------------------
+prices = get_prices(tickers, period)
 
-def calculate_momentum(dataframe):
-    empty_cols = [
-        "Yahoo",
-        "MOM 1M",
-        "MOM 3M",
-        "MOM 6M",
-        "MOM 12M",
-        "Momentum raw",
-        "Momentum composite"
+if prices.empty:
+    st.error("Jeg kunne ikke hente kursdata. Tjek tickerkoder eller ISIN-mapping til kursdata.")
+    st.stop()
+
+momentum = calculate_momentum(prices)
+
+# Tilføj 1 uge momentum direkte fra prisdata
+if not prices.empty and len(prices) > 5:
+    mom_1w = prices.pct_change(5).iloc[-1].rename("1W").reset_index()
+    mom_1w.columns = ["Ticker", "1W"]
+    momentum = momentum.merge(mom_1w, on="Ticker", how="left")
+
+report = portfolio.merge(momentum, on="Ticker", how="left")
+report = add_stop_loss(report)
+
+# Brug ETF_Navn som label overalt i rapporten. Fallback til Ticker hvis navn mangler.
+if "ETF_Navn" not in report.columns:
+    report["ETF_Navn"] = report.get("Ticker", "")
+report["ETF_Label"] = report["ETF_Navn"].fillna("").astype(str).str.strip()
+report.loc[report["ETF_Label"].eq("") | report["ETF_Label"].str.lower().eq("nan"), "ETF_Label"] = report["Ticker"]
+
+total_exposure = report["Exposure"].sum(skipna=True) if "Exposure" in report.columns else 0
+valid_score = report["MomentumScore"].dropna() if "MomentumScore" in report.columns else pd.Series(dtype=float)
+weak = (report["Signal"].isin(["Reducer", "Sælg/undgå"])).sum() if "Signal" in report.columns else 0
+
+portfolio_sharpe = (report["Weight"] * report["Sharpe"]).sum(skipna=True) if {"Weight", "Sharpe"}.issubset(report.columns) else None
+portfolio_sortino = (report["Weight"] * report["Sortino"]).sum(skipna=True) if {"Weight", "Sortino"}.issubset(report.columns) else None
+
+col1, col2, col3, col4, col5 = st.columns(5)
+
+col1.metric("Positioner", len(report))
+col2.metric("Samlet porteføljeværdi", f"{total_exposure:,.0f} kr".replace(",", "."))
+col3.metric("Portefølje Sharpe", f"{portfolio_sharpe:.2f}" if portfolio_sharpe is not None else "-")
+col4.metric("Portefølje Sortino", f"{portfolio_sortino:.2f}" if portfolio_sortino is not None else "-")
+
+st.subheader("Momentum ranking")
+show_cols = [
+    "ETF_Label",
+    "Weight",
+    "1W",
+    "1M",
+    "3M",
+    "6M",
+    "12M",
+    "Volatility",
+    "MaxDrawdown",
+    "StopPct",
+    "StopPrice",
+    "AlarmPct",
+    "StopAction",
     ]
+show_cols = [c for c in show_cols if c in report.columns]
 
-    try:
-        tickers = dataframe["Yahoo"].dropna().unique().tolist()
+styled = report[show_cols].copy()
 
-        if len(tickers) == 0:
-            return pd.DataFrame(columns=empty_cols)
+if "MomentumScore" in styled.columns:
+    styled = styled.sort_values("MomentumScore", ascending=False, na_position="last"
+)
 
-        price_data = download_prices(tickers, period="13mo")
+# Formatér procentkolonner
+if "Weight" in styled.columns:
+    styled["Weight"] = styled["Weight"].apply(
+        lambda x: f"{x:.2%}" if pd.notnull(x) else ""
+    )
 
-        if price_data is None or price_data.empty:
-            return pd.DataFrame(columns=empty_cols)
-
-        price_data = price_data.ffill().dropna(how="all")
-        latest = price_data.iloc[-1]
-
-        def calc_return(days):
-            if len(price_data) > days:
-                return latest / price_data.iloc[-days] - 1
-            return pd.Series(np.nan, index=price_data.columns)
-
-        momentum_df = pd.DataFrame(index=price_data.columns)
-        momentum_df["MOM 1M"] = calc_return(21)
-        momentum_df["MOM 3M"] = calc_return(63)
-        momentum_df["MOM 6M"] = calc_return(126)
-        momentum_df["MOM 12M"] = calc_return(252)
-
-        # Momentum vægtning:
-        # 12M og 6M vægtes højest, fordi de bedst fanger den større trend.
-        # 1M og 3M bruges som trendvending / acceleration.
-        momentum_df["Momentum raw"] = (
-            momentum_df["MOM 1M"] * 0.10
-            + momentum_df["MOM 3M"] * 0.25
-            + momentum_df["MOM 6M"] * 0.30
-            + momentum_df["MOM 12M"] * 0.35
+for col in ["1W", "1M", "3M", "6M", "12M"]:
+    if col in styled.columns:
+        styled[col] = styled[col].apply(
+            lambda x: f"{x:.2%}" if pd.notnull(x) else ""
         )
 
-        momentum_df["Momentum composite"] = momentum_df["Momentum raw"].copy()
+st.dataframe(
+    styled,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "MomentumScore": st.column_config.NumberColumn("Momentum", format="%.2f"),
+        "Sharpe": st.column_config.NumberColumn("Sharpe", format="%.2f"),
+        "Sortino": st.column_config.NumberColumn("Sortino", format="%.2f"),
+    },
+)
+   
+left, right = st.columns(2)
+with left:
+   st.subheader("1/3/6/12 mdr afkast")
 
-        # Straf ved kortsigtet trendbrud.
-        momentum_df.loc[momentum_df["MOM 1M"] < 0, "Momentum composite"] *= 0.75
-        momentum_df.loc[momentum_df["MOM 3M"] < 0, "Momentum composite"] *= 0.65
-        momentum_df.loc[momentum_df["MOM 6M"] < 0, "Momentum composite"] *= 0.70
+returns_long = (
+    report[
+        ["ETF_Label", "1W", "1M", "3M", "6M", "12M"]
+    ]
+    .melt(
+        id_vars="ETF_Label",
+        var_name="Periode",
+        value_name="Return"
+    )
+    .dropna()
+)
 
-        momentum_df = momentum_df.reset_index()
-        first_col = momentum_df.columns[0]
-        momentum_df = momentum_df.rename(columns={first_col: "Yahoo"})
+fig = px.bar(
+    returns_long,
+    y="ETF_Label",
+    x="Return",
+    color="Periode",
+    orientation="h",
+    barmode="group",
+)
 
-        return momentum_df[empty_cols]
+fig.update_layout(
+    height=700,
+    yaxis=dict(
+        categoryorder="total ascending"
+    )
+)
 
-    except Exception:
-        return pd.DataFrame(columns=empty_cols)
+fig.update_xaxes(
+    tickformat=".0%"
+)
 
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
 
-momentum_df = calculate_momentum(df)
+with right:
+    st.subheader("Risk cloud")
+    if {"Volatility", "MomentumScore"}.issubset(report.columns):
+        fig2 = px.scatter(
+            report,
+            x="Volatility",
+            y="MomentumScore",
+            size="Exposure" if "Exposure" in report.columns else None,
+            color="Signal" if "Signal" in report.columns else None,
+            hover_name="ETF_Label",
+            hover_data=[c for c in ["Sector", "Sharpe", "Sortino", "MaxDrawdown"] if c in report.columns],
+        )
+        fig2.update_xaxes(tickformat=".0%")
+        st.plotly_chart(fig2, use_container_width=True)
 
-required_momentum_cols = [
-    "Yahoo",
-    "MOM 1M",
-    "MOM 3M",
-    "MOM 6M",
-    "MOM 12M",
-    "Momentum raw",
-    "Momentum composite"
+st.subheader("Handlingsoversigt")
+
+overview = pd.DataFrame()
+
+# Top buys
+buy_df = report.loc[
+    report["Signal"].isin(["Øg"])
+].sort_values(
+    "MomentumScore",
+    ascending=False
+)
+
+# Top reductions
+reduce_df = report.loc[
+    report["Signal"].isin(["Reducer", "Sælg/undgå"])
+].sort_values(
+    "MomentumScore"
+)
+
+# Hard gate
+gate_df = report.loc[
+    (report["Sharpe"] < 1.0)
+    | (report["Sortino"] < 1.5)
+    | (report["MaxDrawdown"] < -0.30)
 ]
 
-if momentum_df is None or momentum_df.empty or "Yahoo" not in momentum_df.columns:
-    momentum_df = pd.DataFrame(columns=required_momentum_cols)
+# Hard read-out
+readout_df = report.loc[
+    (report["MomentumScore"] < 0.5)
+]
 
-for col in required_momentum_cols:
-    if col not in momentum_df.columns:
-        momentum_df[col] = np.nan
+overview = pd.DataFrame({
+    "Kategori": [
+        "Top buys",
+        "Top reductions",
+        "Hard gate",
+        "Hard read-out",
+    ],
+    "Resultat": [
+        ", ".join(buy_df["ETF_Label"].head(3))
+        if not buy_df.empty else "Ingen",
 
-momentum_df = momentum_df[required_momentum_cols]
-df = df.merge(momentum_df, on="Yahoo", how="left")
+        ", ".join(reduce_df["ETF_Label"].head(3))
+        if not reduce_df.empty else "Ingen",
 
-for col in ["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M", "Momentum raw", "Momentum composite"]:
-    if col not in df.columns:
-        df[col] = np.nan
+        ", ".join(gate_df["ETF_Label"].head(3))
+        if not gate_df.empty else "Ingen",
 
-# Valide momentumdata kræver alle 1/3/6/12M afkast.
-df["Momentum data valid"] = df[["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]].notna().all(axis=1)
+        ", ".join(readout_df["ETF_Label"].head(3))
+        if not readout_df.empty else "Ingen",
+    ]
+})
+
+st.dataframe(
+    zebra_table(overview),
+    use_container_width=True,
+    hide_index=True,
+    height=auto_height(overview),
+)
+st.subheader("Rebalanceringsindikation")
+
+portfolio_value = report["Exposure"].sum(skipna=True)
+
+buy_mask = report["Signal"] == "Øg" if "Signal" in report.columns else False
+hold_mask = report["Signal"] == "Hold" if "Signal" in report.columns else False
+reduce_mask = report["Signal"].isin(["Afvent", "Reducer", "Sælg/undgå"]) if "Signal" in report.columns else False
 
 # ---------------------------------------------------
-# Sharpe / Sortino
+# Basis rebalancering efter signal
 # ---------------------------------------------------
+report["TargetWeight"] = report["Weight"].fillna(0)
 
-def calculate_sharpe_sortino(dataframe, period="1y", risk_free_rate=0.02):
-    try:
-        tickers = dataframe["Yahoo"].dropna().unique().tolist()
+if "Signal" in report.columns:
+    report.loc[buy_mask, "TargetWeight"] *= 1.20
+    report.loc[hold_mask, "TargetWeight"] *= 1.00
+    report.loc[reduce_mask, "TargetWeight"] *= 0.80
 
-        if len(tickers) == 0:
-            return None, None
+target_sum = report["TargetWeight"].sum(skipna=True)
+if target_sum and target_sum > 0:
+    report["TargetWeight"] = report["TargetWeight"] / target_sum
+else:
+    report["TargetWeight"] = report["Weight"].fillna(0)
 
-        price_data = download_prices(tickers, period=period)
-        daily_returns = price_data.pct_change().dropna()
+report["TargetExposure"] = report["TargetWeight"] * portfolio_value
+report["TradeDKK"] = report["TargetExposure"] - report["Exposure"]
 
-        if daily_returns.empty:
-            return None, None
+# ---------------------------------------------------
+# Momentum-baseret sektor rebalancering
+# ---------------------------------------------------
+rebal_cols = [
+    "ETF_Label",
+    "Sector",
+    "Weight",
+    "TargetWeight",
+    "TradeDKK",
+    "Sharpe",
+    "Sortino",
+    "Signal",
+]
+rebal_cols = [c for c in rebal_cols if c in report.columns]
+rebal_df = report[rebal_cols].copy()
 
-        weights = (
-            dataframe.groupby("Yahoo")["Market value"].sum()
-            / dataframe["Market value"].sum()
+if {"Sector", "MomentumScore", "Weight"}.issubset(report.columns):
+    sector = (
+        report
+        .groupby("Sector", dropna=False)
+        .agg(
+            CurrentSectorWeight=("Weight", "sum"),
+            SectorMomentum=("MomentumScore", "mean"),
+        )
+        .reset_index()
+    )
+
+    def calc_sector_weight(score):
+        if pd.isna(score):
+            return SECTOR_MIN
+        if score >= 0.80:
+            return SECTOR_MAX
+        elif score >= 0.60:
+            return 0.15
+        elif score >= 0.40:
+            return 0.10
+        elif score > 0:
+            return SECTOR_MIN
+        else:
+            return 0.00
+
+    sector["TargetSectorWeight"] = sector["SectorMomentum"].apply(calc_sector_weight)
+
+    sector_total = sector["TargetSectorWeight"].sum(skipna=True)
+    if sector_total and sector_total > 0:
+        sector["TargetSectorWeight"] = sector["TargetSectorWeight"] / sector_total
+    else:
+        sector["TargetSectorWeight"] = sector["CurrentSectorWeight"]
+
+    rebal_df = rebal_df.merge(
+        sector[["Sector", "TargetSectorWeight"]],
+        on="Sector",
+        how="left",
+    )
+
+    sector_weight_sum = rebal_df.groupby("Sector")["Weight"].transform("sum")
+    intra_sector_weight = rebal_df["Weight"] / sector_weight_sum.replace(0, pd.NA)
+
+    rebal_df["TargetWeight"] = rebal_df["TargetSectorWeight"] * intra_sector_weight
+    rebal_df["TargetWeight"] = rebal_df["TargetWeight"].fillna(rebal_df["Weight"])
+    rebal_df["TargetExposure"] = rebal_df["TargetWeight"] * portfolio_value
+    rebal_df["TradeDKK"] = rebal_df["TargetExposure"] - report.loc[rebal_df.index, "Exposure"].values
+else:
+    rebal_df["TargetSectorWeight"] = rebal_df.get("TargetWeight", rebal_df.get("Weight", 0))
+
+if "MomentumScore" in rebal_df.columns:
+    rebal_df = rebal_df.sort_values("MomentumScore", ascending=False, na_position="last")
+
+# ---------------------------------------------------
+# Visningsformat - ændrer ikke datagrundlaget
+# ---------------------------------------------------
+rebal_display = rebal_df.copy()
+
+# Kun vægte skal vises som %
+percent_cols = [
+    "Weight",
+    "TargetWeight",
+    "TargetSectorWeight",
+]
+
+for col in percent_cols:
+    if col in rebal_display.columns:
+        numeric_col = pd.to_numeric(
+            rebal_display[col],
+            errors="coerce"
         )
 
-        weights = weights.reindex(daily_returns.columns).fillna(0)
-        portfolio_returns = daily_returns.dot(weights)
+        rebal_display[col] = numeric_col.apply(
+            lambda x:
+            f"{x:.1%}"
+            if pd.notnull(x)
+            else ""
+        )
 
-        mean_daily_return = portfolio_returns.mean()
-        daily_volatility = portfolio_returns.std()
-
-        downside_returns = portfolio_returns[portfolio_returns < 0]
-        downside_volatility = downside_returns.std()
-
-        annual_return = mean_daily_return * 252
-        annual_volatility = daily_volatility * np.sqrt(252)
-        annual_downside_volatility = downside_volatility * np.sqrt(252)
-
-        sharpe = None if annual_volatility == 0 or pd.isna(annual_volatility) else (annual_return - risk_free_rate) / annual_volatility
-        sortino = None if annual_downside_volatility == 0 or pd.isna(annual_downside_volatility) else (annual_return - risk_free_rate) / annual_downside_volatility
-
-        return sharpe, sortino
-
-    except Exception:
-        return None, None
-
-
-sharpe_score, sortino_score = calculate_sharpe_sortino(df)
-
-# ---------------------------------------------------
-# KPI'er
-# ---------------------------------------------------
-
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric("Porteføljeværdi", format_dkk(total_value))
-col2.metric("Sharpe score", format_score(sharpe_score) if sharpe_score is not None else "N/A")
-col3.metric("Sortino score", format_score(sortino_score) if sortino_score is not None else "N/A")
-col4.metric("Antal aktier", len(df))
-
-# ---------------------------------------------------
-# Momentum-fokuseret scoringmodel
-# ---------------------------------------------------
-
-df["Current weight"] = df["Weight %"]
-
-
-def momentum_score_from_row(row):
-    if not row["Momentum data valid"] or pd.isna(row["Momentum composite"]):
-        return 1
-
-    value = float(row["Momentum composite"])
-
-    if value >= 0.45:
-        return 5
-    elif value >= 0.25:
-        return 4
-    elif value >= 0.10:
-        return 3
-    elif value > 0:
-        return 2
-    return 1
-
-
-df["Momentum score"] = df.apply(momentum_score_from_row, axis=1)
-
-
-def concentration_risk(weight):
-    try:
-        weight = float(weight)
-
-        if weight >= 0.18:
-            return 5
-        elif weight >= 0.12:
-            return 4
-        elif weight >= 0.08:
-            return 3
-        elif weight >= 0.04:
-            return 2
-        return 1
-    except Exception:
-        return 3
-
-
-df["Concentration risk"] = df["Current weight"].apply(concentration_risk)
-
-high_risk_tickers = [
-    "AMC:XETR",
-    "IVN:NEOE",
-    "VWS:XCSE",
-    "ENR:XETR"
+# Momentum / Sharpe / Sortino = almindelige tal
+score_cols = [
+    "MomentumScore",
+    "Sharpe",
+    "Sortino",
 ]
 
-low_risk_tickers = [
-    "MSF:XETR",
-    "TSM:XNYS",
-    "ABB:XSTO"
-]
-
-
-def stock_risk_score(ticker):
-    ticker = str(ticker)
-
-    if ticker in high_risk_tickers:
-        return 5
-    elif ticker in low_risk_tickers:
-        return 2
-    return 3
-
-
-df["Stock risk"] = df["Ticker"].apply(stock_risk_score)
-
-# Risiko-score: højere score = højere risiko.
-df["Risk score"] = (
-    df["Concentration risk"] * 0.45
-    + df["Stock risk"] * 0.35
-    + (6 - df["Momentum score"]) * 0.20
-)
-
-# Investerbarhed: kun aktier med komplette momentumdata og positivt momentum kan få overvægt.
-df["Investable"] = (
-    df["Momentum data valid"]
-    & df["Momentum composite"].notna()
-    & (df["Momentum composite"] > 0)
-)
-
-# Allokeringsscore:
-# 1) momentum driver modellen
-# 2) risiko reducerer kapitalallokering
-# 3) score opløftes med power 2/3/4 for at undgå jævn fordeling
-risk_adjustment = (6 - df["Risk score"]).clip(lower=0.25) / 5
-trend_quality = np.where(
-    (df["MOM 1M"] > 0) & (df["MOM 3M"] > 0) & (df["MOM 6M"] > 0) & (df["MOM 12M"] > 0),
-    1.15,
-    np.where((df["MOM 3M"] > 0) & (df["MOM 6M"] > 0), 1.00, 0.70)
-)
-
-df["Allocation base"] = np.where(
-    df["Investable"],
-    df["Momentum composite"].clip(lower=0) * risk_adjustment * trend_quality,
-    0
-)
-
-df["Allocation score"] = np.where(
-    df["Allocation base"] > 0,
-    df["Allocation base"] ** rotation_power,
-    0
-)
-
-# Portfolio score bruges til visning. Den må ikke alene drive target weight.
-df["Portfolio score"] = (
-    df["Momentum score"] * 0.65
-    + (6 - df["Risk score"]) * 0.35
-).clip(lower=0.5)
-
-
-def cap_and_redistribute(score_series, cap):
-    """Normaliserer scores til vægte, capper maks. vægt og redistribuerer resten."""
-    scores = pd.Series(score_series).fillna(0).clip(lower=0)
-    weights = pd.Series(0.0, index=scores.index)
-
-    if scores.sum() <= 0:
-        return weights
-
-    remaining_index = scores.index[scores > 0].tolist()
-    remaining_weight = 1.0
-    capped = set()
-
-    for _ in range(20):
-        if not remaining_index or remaining_weight <= 0:
-            break
-
-        sub_scores = scores.loc[remaining_index]
-        if sub_scores.sum() <= 0:
-            break
-
-        tentative = sub_scores / sub_scores.sum() * remaining_weight
-        over_cap = tentative[tentative > cap]
-
-        if over_cap.empty:
-            weights.loc[remaining_index] = tentative
-            break
-
-        for idx in over_cap.index:
-            weights.loc[idx] = cap
-            capped.add(idx)
-
-        remaining_weight = 1.0 - weights.sum()
-        remaining_index = [idx for idx in remaining_index if idx not in capped]
-
-    # Sikkerhedsnormalisering hvis cap er for lav til antal positioner.
-    if weights.sum() > 0:
-        weights = weights / weights.sum()
-
-    return weights
-
-
-# Først reserveres vægt til aktier uden valide momentumdata, afhængigt af policy.
-missing_mask = ~df["Momentum data valid"]
-reserved_missing_weight = pd.Series(0.0, index=df.index)
-
-if nan_policy == "Behold nuværende vægt":
-    reserved_missing_weight.loc[missing_mask] = df.loc[missing_mask, "Current weight"]
-else:
-    reserved_missing_weight.loc[missing_mask] = missing_data_weight
-
-# Sikring mod at missing-data-reserven ikke overstiger 35% af porteføljen.
-if reserved_missing_weight.sum() > 0.35:
-    reserved_missing_weight = reserved_missing_weight / reserved_missing_weight.sum() * 0.35
-
-remaining_capital_weight = max(0.0, 1.0 - reserved_missing_weight.sum())
-
-valid_weights = cap_and_redistribute(df["Allocation score"], max_weight)
-df["Suggested weight"] = reserved_missing_weight + valid_weights * remaining_capital_weight
-
-# Hvis ingen aktier er investerbare, beholdes nuværende portefølje for ikke at give meningsløse signaler.
-if df["Suggested weight"].sum() <= 0:
-    df["Suggested weight"] = df["Current weight"]
-else:
-    df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
-
-# Aktier uden valide data må aldrig få højere vægt end nuværende vægt.
-no_data_increase = (~df["Momentum data valid"]) & (df["Suggested weight"] > df["Current weight"])
-df.loc[no_data_increase, "Suggested weight"] = df.loc[no_data_increase, "Current weight"]
-
-# Normaliser igen efter datakontrol.
-df["Suggested weight"] = df["Suggested weight"] / df["Suggested weight"].sum()
-
-df["Suggested value"] = df["Suggested weight"] * total_value
-df["Trade DKK"] = df["Suggested value"] - df["Market value"]
-df["Weight change"] = df["Suggested weight"] - df["Current weight"]
-
-
-def priority_bucket(row):
-    if not row["Momentum data valid"]:
-        return "Datatjek"
-
-    mom_1m = row.get("MOM 1M", np.nan)
-    mom_3m = row.get("MOM 3M", np.nan)
-    mom_6m = row.get("MOM 6M", np.nan)
-    mom_12m = row.get("MOM 12M", np.nan)
-
-    # Hard gate: negativ 1M må aldrig være Top momentum
-    if pd.notnull(mom_1m) and mom_1m < 0:
-        if (
-            pd.notnull(mom_6m)
-            and pd.notnull(mom_12m)
-            and mom_6m > 0
-            and mom_12m > 0
-        ):
-            return "Momentum weakening"
-        return "Negativ trend"
-
-    if row["Momentum composite"] <= 0:
-        return "Negativ trend"
-
-    # Top momentum kræver positiv 1M + høj score + acceptabel risiko
-    if (
-        pd.notnull(mom_1m)
-        and mom_1m > 0
-        and row["Momentum score"] >= 5
-        and row["Risk score"] <= 3.0
-    ):
-        return "Top momentum"
-
-    if row["Momentum score"] >= 4:
-        return "Stærk"
-
-    if row["Momentum score"] >= 3:
-        return "Neutral+"
-
-    return "Svag"
-
-# ---------------------------------------------------
-# Porteføljeoversigt
-# ---------------------------------------------------
-
-st.subheader("Porteføljeoversigt")
-
-display_df = df.copy()
-
-for col in ["Købskurs", "Aktuel kurs"]:
-    if col in display_df.columns:
-        display_df[col] = display_df[col].apply(format_number)
-
-for col in ["Beholdning", "Gevinst", "Gain/Loss"]:
-    if col in display_df.columns:
-        display_df[col] = display_df[col].apply(format_dkk)
-
-for col in ["Return %", "Weight %", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]:
-    if col in display_df.columns:
-        display_df[col] = display_df[col].apply(format_pct)
-
-columns_to_hide = [
-    "Yahoo",
-    "Market value",
-    "Cost value",
-    "Current weight",
-    "Concentration risk",
-    "Stock risk",
-    "Risk score",
-    "Portfolio score",
-    "Suggested weight",
-    "Suggested value",
-    "Trade DKK",
-    "Weight change",
-    "Target weight",
-    "Investable",
-    "Allocation base",
-    "Allocation score",
-    "Momentum data valid",
-    "Momentum raw"
-]
-
-display_df = display_df.drop(
-    columns=[col for col in columns_to_hide if col in display_df.columns],
-    errors="ignore"
-)
-
-preferred_order = [
-    "Navn",
-    "Weight %",
-    "Antal",
-    "Købskurs",
-    "Aktuel kurs",
-    "Beholdning",
-    "Gain/Loss",
-    "Valuta",
-    "Sektor",
-    "Prioritet"
-]
-
-existing_cols = [col for col in preferred_order if col in display_df.columns]
-display_df = display_df[existing_cols]
-
-st.dataframe(
-    display_df,
-    use_container_width=True,
-    hide_index=True,
-    height=530
-)
-
-# ---------------------------------------------------
-# Vægtning pr. aktie
-# ---------------------------------------------------
-
-st.subheader("Vægtning pr. aktie")
-
-weight_df = df.sort_values("Weight %", ascending=False).copy()
-weight_df["Weight label"] = weight_df["Weight %"].apply(lambda x: f"{x:.1%}".replace(".", ","))
-
-fig_weight = px.bar(
-    weight_df,
-    x="Ticker",
-    y="Weight %",
-    text="Weight label"
-)
-
-fig_weight.update_traces(textposition="outside")
-fig_weight.update_layout(
-    yaxis_tickformat=".0%",
-    xaxis_title="Aktie",
-    yaxis_title="Vægt",
-    uniformtext_minsize=10,
-    uniformtext_mode="show"
-)
-
-st.plotly_chart(fig_weight, use_container_width=True)
-
-# ---------------------------------------------------
-# Momentum overview
-# ---------------------------------------------------
-
-st.subheader("Momentum 1/3/6/12 måneder")
-
-momentum_view = df.copy()
-name_col = "Navn" if "Navn" in momentum_view.columns else "Ticker"
-
-momentum_cols = [
-    "Navn",
-    "Ticker",
-    "MOM 1M",
-    "MOM 3M",
-    "MOM 6M",
-    "MOM 12M",
-    "Momentum composite",
-    "Momentum score",
-    "Momentum data valid",
-    "Prioritet",
-]
-
-momentum_cols = [c for c in momentum_cols if c in momentum_view.columns]
-
-momentum_view = momentum_view[momentum_cols].copy()
-
-momentum_view = momentum_view.rename(
-    columns={
-        name_col: "Instrument",
-        "Momentum composite": "Momentum samlet",
-        "Momentum score": "Score",
-        "Momentum data valid": "Data OK"
-    }
-)
-
-momentum_view = momentum_view.sort_values("Momentum samlet", ascending=False, na_position="last")
-momentum_display = momentum_view.copy()
-
-for col in ["MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M", "Momentum samlet"]:
-    momentum_display[col] = momentum_display[col].apply(format_pct)
-
-momentum_display["Score"] = momentum_display["Score"].apply(format_score_1)
-momentum_display["Data OK"] = momentum_display["Data OK"].map({True: "Ja", False: "Nej"})
-
-st.dataframe(
-    momentum_display,
-    use_container_width=True,
-    hide_index=True,
-    height=550
-)
-
-momentum_chart_df = momentum_view.copy()
-momentum_chart_df["Momentum samlet"] = momentum_chart_df["Momentum samlet"] * 100
-momentum_chart_df = momentum_chart_df.dropna(subset=["Momentum samlet"])
-
-momentum_chart_df = momentum_view.copy()
-
-if "Momentum samlet" in momentum_chart_df.columns:
-    momentum_chart_df["Momentum samlet"] = pd.to_numeric(
-        momentum_chart_df["Momentum samlet"],
+for col in score_cols:
+    if col in rebal_display.columns:
+
+        numeric_col = pd.to_numeric(
+            rebal_display[col],
+            errors="coerce"
+        )
+
+        rebal_display[col] = numeric_col.apply(
+            lambda x:
+            f"{x:.1f}"
+            if pd.notnull(x)
+            else ""
+    
+        )
+
+if "TradeDKK" in rebal_display.columns:
+    trade_numeric = pd.to_numeric(
+        rebal_display["TradeDKK"],
         errors="coerce"
     )
 
-    chart_x = "Instrument" if "Instrument" in momentum_chart_df.columns else "Ticker"
-
-    momentum_chart_df = momentum_view.copy()
-
-if "Momentum samlet" in momentum_chart_df.columns:
-    momentum_chart_df["Momentum samlet"] = pd.to_numeric(
-        momentum_chart_df["Momentum samlet"],
-        errors="coerce"
+    rebal_display["TradeDKK"] = trade_numeric.map(
+        lambda x: f"{x:,.0f}".replace(",", ".")
+        if pd.notnull(x)
+        else ""
     )
 
-    chart_x = "Instrument" if "Instrument" in momentum_chart_df.columns else "Ticker"
-
-    momentum_chart_df = momentum_chart_df.dropna(subset=["Momentum samlet"]).copy()
-
-    momentum_chart_df["Label"] = momentum_chart_df["Momentum samlet"].apply(
-        lambda x: f"{x:.1%}".replace(".", ",") if pd.notnull(x) else ""
-    )
-
-    fig_momentum = px.bar(
-        momentum_chart_df,
-        x=chart_x,
-        y="Momentum samlet",
-        text="Label",
-        title="Samlet momentum baseret på 1/3/6/12M"
-    )
-
-    fig_momentum.update_traces(textposition="outside")
-
-    fig_momentum.update_layout(
-        xaxis_title="Aktie",
-        yaxis_title="Momentum samlet",
-        yaxis_tickformat=".0%",
-        xaxis_tickangle=-45,
-    )
-
-    st.plotly_chart(fig_momentum, use_container_width=True)
-else:
-    st.warning("Momentum samlet mangler og grafen kan derfor ikke vises."
-    )
-
-    fig_momentum.update_traces(textposition="outside")
-
-    fig_momentum.update_layout(
-        xaxis_title="Aktie",
-        yaxis_title="Momentum samlet",
-        yaxis_tickformat=".0%",
-        xaxis_tickangle=-45,
-    )
-
-    st.plotly_chart(fig_momentum, use_container_width=True)
-
-    st.warning("Momentum samlet mangler og grafen kan derfor ikke vises.")
-
-
-fig_momentum.update_traces(textposition="outside")
-fig_momentum.update_layout(
-    xaxis_title="Aktie",
-    yaxis_title="Momentum samlet (%)",
-    xaxis_tickangle=-45,
-    uniformtext_minsize=9,
-    uniformtext_mode="show"
+st.dataframe(
+    rebal_display,
+    use_container_width=True,
+    hide_index=True,
 )
 
-st.plotly_chart(fig_momentum, use_container_width=True)
+csv = report.to_csv(index=False).encode("utf-8-sig")
+st.download_button("Download CSV", csv, file_name="momentum_report.csv", mime="text/csv")
 
-# ---------------------------------------------------
-# Rebalanceringsforslag
-# ---------------------------------------------------
+pdf_bytes = create_pdf(report.sort_values("MomentumScore", ascending=False, na_position="last"))
+st.download_button("Download PDF", pdf_bytes, file_name="momentum_report.pdf", mime="application/pdf")
 
-st.subheader("Rebalanceringsforslag")
+st.subheader("Rotation signals and monthly rules")
+
+rotation_signals = pd.DataFrame({
+    "Theme": [
+        "Korea",
+        "SECO / Semiconductors",
+        "Rare Earth / VWMX",
+        "Uranium",
+        "Defence",
+        "Space",
+        "Clean Energy",
+        "Quantum",
+    ],
+    "Current signal": [
+        "Confirmed momentum; strong 1/3/6/12M",
+        "Confirmed momentum; now below 25% cap",
+        "1M negative despite strong 6/12M",
+        "1M and 3M negative",
+        "1M and 3M negative",
+        "Confirmed momentum but already overweight vs target",
+        "Positive but moderate momentum",
+        "Confirmed momentum and underweight",
+    ],
+    "Action": [
+        "Add modestly; cap because it overlaps with semis/electronics cycle.",
+        "Eligible for add back toward 25%, but avoid excessive concentration.",
+        "Reduce to target; no add until 1M > 0.",
+        "Hold/reduce only; no averaging down.",
+        "Reduce/hold only; no buy now.",
+        "Trim excess; keep core exposure.",
+        "Small add allowed.",
+        "Top buy, but keep as satellite due high volatility.",
+    ],
+})
+
+st.dataframe(
+    zebra_table(rotation_signals),
+    use_container_width=True,
+    hide_index=True,
+    height=auto_height(rotation_signals),
+)
+
+monthly_rules = pd.DataFrame({
+    "Rule": [
+        "Momentum score",
+        "Momentum gate",
+        "Positive reversal",
+        "Momentum weakening",
+        "Confirmed momentum",
+        "Risk KPI",
+    ],
+    "Implementation": [
+        "1M 15% + 3M 25% + 6M 30% + 12M 30%",
+        "Do not add to ETFs with 1M < 0 unless clear positive reversal exists.",
+        "1M > 0 and 1M > average(3M, 6M).",
+        "1M < 0 while 6M/12M remain positive - protect gains, no averaging down.",
+        "1/3/6/12M all positive - eligible for buy/overweight, subject to caps.",
+        "Track portfolio Sharpe and Sortino weekly; deterioration confirms rising drawdown risk or poor rebalancing value.",
+    ],
+})
+
+st.dataframe(
+    zebra_table(monthly_rules),
+    use_container_width=True,
+    hide_index=True,
+    height=auto_height(monthly_rules),
+)
 
 st.caption(
-    "Modellen bruger momentumrotation: stærke 1/3/6/12M trends får kapital, svage/negative trends reduceres, og aktier uden valide data kan ikke få Øg-anbefaling."
+    "Takeaway: Buy strength, trim concentration and do not average down in weak 1M trends. "
+    "The portfolio is high-performing but still high-beta thematic exposure."
+)
+st.subheader("Monthly ETF heatmap and risk KPIs")
+
+# ---------- KPI ----------
+kpi = pd.DataFrame()
+
+portfolio_sharpe = (
+    (report["Weight"] * report["Sharpe"]).sum()
+    if {"Weight", "Sharpe"}.issubset(report.columns)
+    else None
 )
 
-rebalance_df = df.copy()
+portfolio_sortino = (
+    (report["Weight"] * report["Sortino"]).sum()
+    if {"Weight", "Sortino"}.issubset(report.columns)
+    else None
+)
 
-
-def recommendation(row):
-    trade = row["Trade DKK"]
-    weight_change = row["Weight change"]
-    momentum = row["Momentum score"]
-    data_ok = row["Momentum data valid"]
-    investable = row["Investable"]
-
-    if not data_ok:
-        if trade < -total_value * trade_threshold:
-            return "Reducer / datatjek"
-        return "Hold / datatjek"
-
-    if not investable:
-        if trade < -total_value * trade_threshold:
-            return "Reducer"
-        return "Hold"
-
-    if trade > total_value * trade_threshold and weight_change > 0 and momentum >= 3:
-        return "Øg"
-    elif trade < -total_value * trade_threshold and weight_change < 0:
-        return "Reducer"
-    return "Hold"
-
-
-rebalance_df["Anbef."] = rebalance_df.apply(recommendation, axis=1)
-name_col = "Navn" if "Navn" in rebalance_df.columns else "Ticker"
-
-rebal_cols = [
-    name_col,
-    "Yahoo",
-    "Current weight",
-    "Suggested weight",
-    "Weight change",
-    "Market value",
-    "Trade DKK",
-    "MOM 1M",
-    "MOM 3M",
-    "MOM 6M",
-    "MOM 12M",
-    "Momentum score",
-    "Risk score",
-    "Portfolio score",
-    "Anbef.",
+top_weight = report.loc[
+    report["Weight"].idxmax(),
+    "ETF_Label"
 ]
 
-rebal_cols = [c for c in rebal_cols if c in rebalance_df.columns]
+top_weight_pct = report["Weight"].max()
 
-display_rebalance = rebalance_df[rebal_cols].copy()
+negative_1m = report.loc[
+    report["1M"] < 0,
+    "ETF_Label"
+].tolist()
 
-display_rebalance = display_rebalance.rename(
-    columns={
-        name_col: "Instrument",
-        "Current weight": "Aktuel",
-        "Suggested weight": "Forslag",
-        "Weight change": "Ændring",
-        "Market value": "Eksponering",
-        "Trade DKK": "Handel",
-        "Momentum score": "Momentum",
-        "Risk score": "Risiko",
-        "Portfolio score": "Score"
-    }
-)
+kpi["Metric"] = [
+    "Portfolio Sharpe",
+    "Portfolio Sortino",
+    "1W momentum",
+    "1M momentum",
+    "12M est. portfolio return",
+    "Max single ETF weight",
+    "Negative 1M names",
+]
 
-for col in ["Aktuel", "Forslag", "Ændring", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]:
-    display_rebalance[col] = display_rebalance[col].apply(format_pct)
+kpi["Value"] = [
+    f"{portfolio_sharpe:.2f}",
+    f"{portfolio_sortino:.2f}",
+    f"{report['1W'].mean():.1%}" if "1W" in report.columns else "-",
+    f"{report['1M'].mean():.1%}",
+    f"{report['12M'].mean():.1%}",
+    f"{top_weight} ({top_weight_pct:.1%})",
+    ", ".join(negative_1m[:5]),
+]
 
-for col in ["Eksponering", "Handel"]:
-    display_rebalance[col] = display_rebalance[col].apply(format_kr)
-
-for col in ["Momentum", "Risiko", "Score"]:
-    display_rebalance[col] = display_rebalance[col].apply(format_score_1)
-
-# Sortér efter anbefalet køb først og derefter reduktioner.
-display_rebalance["_sort"] = rebalance_df["Suggested weight"].values
-display_rebalance = display_rebalance.sort_values("_sort", ascending=False).drop(columns="_sort")
+kpi["Read-out"] = [
+    "🟢 Strong" if portfolio_sharpe > 2 else "🟡 Moderate",
+    "🟢 Strong" if portfolio_sortino > 3 else "🟡 Moderate",
+    "🟢 Positive" if "1W" in report.columns and report["1W"].mean() > 0 else "🔴 Weak",
+    "🟢 Positive" if report["1M"].mean() > 0 else "🔴 Weak",
+    "🟢 Strong trend" if report["12M"].mean() > 0.5 else "🟡 Neutral",
+    "🟡 Watch concentration" if top_weight_pct > 0.20 else "🟢 Balanced",
+    "🔴 Review negative positions" if len(negative_1m) else "🟢 None",
+]
 
 st.dataframe(
-    display_rebalance,
+    zebra_table(kpi),
     use_container_width=True,
     hide_index=True,
-    height=550
+    height=auto_height(kpi),
 )
 
-# ---------------------------------------------------
-# Rebalanceringsgraf
-# ---------------------------------------------------
+# ---------- HEATMAP ----------
 
-st.subheader("Nuværende vægt vs. foreslået momentumallokering")
+heat_cols = ["1W", "1M", "3M", "6M", "12M"]
+heat_cols = [c for c in heat_cols if c in report.columns]
 
-allocation_chart_df = rebalance_df[
-    [
-        name_col,
-        "Current weight",
-        "Suggested weight"
+heat = (
+    report[
+        ["ETF_Label"] + heat_cols
     ]
-].copy()
-
-allocation_chart_df = allocation_chart_df.rename(
-    columns={
-        name_col: "Instrument",
-        "Current weight": "Nuværende",
-        "Suggested weight": "Forslag"
-    }
+    .set_index("ETF_Label")
 )
 
-allocation_chart_df = allocation_chart_df.sort_values("Forslag", ascending=False)
-allocation_chart_df["Nuværende"] = allocation_chart_df["Nuværende"] * 100
-allocation_chart_df["Forslag"] = allocation_chart_df["Forslag"] * 100
-
-allocation_long_df = allocation_chart_df.melt(
-    id_vars="Instrument",
-    value_vars=["Nuværende", "Forslag"],
-    var_name="Type",
-    value_name="Porteføljevægt"
-)
-
-fig_allocation = px.bar(
-    allocation_long_df,
-    x="Instrument",
-    y="Porteføljevægt",
-    color="Type",
-    barmode="group",
-    text=allocation_long_df["Porteføljevægt"].apply(lambda x: f"{x:.1f}%".replace(".", ",")),
-    title="Nuværende vægt vs. foreslået momentumallokering"
-)
-
-fig_allocation.update_traces(textposition="outside")
-fig_allocation.update_layout(
-    xaxis_title="Aktie",
-    yaxis_title="Porteføljevægt (%)",
-    xaxis_tickangle=-45,
-    legend_title_text="",
-    uniformtext_minsize=9,
-    uniformtext_mode="show"
-)
-
-st.plotly_chart(fig_allocation, use_container_width=True)
-
-# ---------------------------------------------------
-# Top buys / reductions
-# ---------------------------------------------------
-
-col_buy, col_reduce = st.columns(2)
-
-with col_buy:
-    st.subheader("Top buys")
-
-    top_buys = display_rebalance[display_rebalance["Anbef."] == "Øg"].head(5)
-
-    st.dataframe(
-        top_buys,
-        use_container_width=True,
-        hide_index=True
-    )
-
-with col_reduce:
-    st.subheader("Top reductions")
-
-    top_reductions = display_rebalance[display_rebalance["Anbef."].str.contains("Reducer", na=False)].head(5)
-
-    st.dataframe(
-        top_reductions,
-        use_container_width=True,
-        hide_index=True
-    )
-
-# ---------------------------------------------------
-# Risk KPI heatmap
-# ---------------------------------------------------
-
-st.subheader("Risk KPI heatmap")
-
-heatmap_df = rebalance_df[
-    [
-        name_col,
-        "Momentum score",
-        "Risk score",
-        "Portfolio score",
-        "Weight %",
-        "Suggested weight",
-        "Weight change"
-    ]
-].copy()
-
-heatmap_df = heatmap_df.rename(
-    columns={
-        name_col: "Instrument",
-        "Momentum score": "Momentum",
-        "Risk score": "Risiko",
-        "Portfolio score": "Score",
-        "Weight %": "Aktuel vægt",
-        "Suggested weight": "Forslag",
-        "Weight change": "Ændring"
-    }
-)
-
-heatmap_df = heatmap_df.sort_values("Score", ascending=False)
-
-fig_heatmap = px.imshow(
-    heatmap_df[
-        [
-            "Momentum",
-            "Risiko",
-            "Score",
-            "Aktuel vægt",
-            "Forslag",
-            "Ændring"
-        ]
+fig = px.imshow(
+    heat,
+    text_auto=".0%",
+    color_continuous_scale=[
+        [0.0, "#d73027"],   # rød
+        [0.5, "#fee08b"],   # gul
+        [1.0, "#1a9850"],   # grøn
     ],
-    x=[
-        "Momentum",
-        "Risiko",
-        "Score",
-        "Aktuel vægt",
-        "Forslag",
-        "Ændring"
-    ],
-    y=heatmap_df["Instrument"],
     aspect="auto",
-    text_auto=".2f",
-    color_continuous_scale="RdYlGn"
 )
 
-fig_heatmap.update_layout(
-    xaxis_title="KPI",
-    yaxis_title="Aktie"
+fig.update_layout(
+    height=700,
+    coloraxis_colorbar_title="Afkast %",
 )
 
-st.plotly_chart(fig_heatmap, use_container_width=True)
-
-# ---------------------------------------------------
-# Sektorfordeling
-# ---------------------------------------------------
-
-st.subheader("Sektorfordeling")
-
-sector_df = (
-    df.groupby("Sektor", as_index=False)["Market value"]
-    .sum()
-    .sort_values("Market value", ascending=False)
+st.plotly_chart(
+    fig,
+    use_container_width=True
 )
 
-fig_sector = px.pie(
-    sector_df,
-    names="Sektor",
-    values="Market value"
+st.caption(
+    "Hard truth: Høj Sharpe/Sortino er positivt, men beskytter ikke mod koncentration og drawdown."
 )
 
-st.plotly_chart(fig_sector, use_container_width=True)
+st.info("Næste udviklingstrin: TradingView webhook-modul, signal-log og automatisk ugentlig rapport.")
