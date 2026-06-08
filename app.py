@@ -4,11 +4,11 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from data_loader import load_excel_file, standardize_portfolio
-from market_data import fetch_prices
-from momentum import calculate_momentum
-from stop_loss import add_stop_loss
-from reporting import create_pdf
+from modules.data_loader import load_excel_file, standardize_portfolio
+from modules.market_data import fetch_prices
+from modules.momentum import calculate_momentum
+from modules.stop_loss import add_stop_loss
+from modules.reporting import create_pdf
 
 st.set_page_config(page_title="Momentum Dashboard", layout="wide")
 
