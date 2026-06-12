@@ -347,11 +347,11 @@ def calculate_momentum(dataframe):
         )
 
        momentum_df["Momentum composite"] = (
-    momentum_df["MOM 1W"] * w_1w
-    + momentum_df["MOM 1M"] * w_1m
-    + momentum_df["MOM 3M"] * w_3m
-    + momentum_df["MOM 6M"] * w_6m
-    + momentum_df["MOM 12M"] * w_12m
+            momentum_df["MOM 1W"] * w_1w
+            + momentum_df["MOM 1M"] * w_1m
+            + momentum_df["MOM 3M"] * w_3m
+            + momentum_df["MOM 6M"] * w_6m
+            + momentum_df["MOM 12M"] * w_12m
            
         )
 
