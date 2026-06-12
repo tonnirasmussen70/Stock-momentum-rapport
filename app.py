@@ -66,6 +66,26 @@ else:
 
 st.sidebar.header("Momentumrotation")
 
+st.sidebar.subheader("Momentum-vægtning")
+
+w_1w = st.sidebar.slider("Vægt 1W", 0.00, 0.50, 0.20, 0.05)
+w_1m = st.sidebar.slider("Vægt 1M", 0.00, 0.50, 0.25, 0.05)
+w_3m = st.sidebar.slider("Vægt 3M", 0.00, 0.50, 0.25, 0.05)
+w_6m = st.sidebar.slider("Vægt 6M", 0.00, 0.50, 0.20, 0.05)
+w_12m = st.sidebar.slider("Vægt 12M", 0.00, 0.50, 0.10, 0.05)
+
+weight_sum = w_1w + w_1m + w_3m + w_6m + w_12m
+
+if weight_sum == 0:
+    st.sidebar.error("Momentum-vægte må ikke alle være 0.")
+    st.stop()
+
+w_1w = w_1w / weight_sum
+w_1m = w_1m / weight_sum
+w_3m = w_3m / weight_sum
+w_6m = w_6m / weight_sum
+w_12m = w_12m / weight_sum
+
 rotation_strength = st.sidebar.selectbox(
     "Rotationsstyrke",
     ["Moderat", "Aggressiv", "Meget aggressiv"],
@@ -326,12 +346,13 @@ def calculate_momentum(dataframe):
             + momentum_df["MOM 12M"] * 0.35
         )
 
-        momentum_df["Momentum composite"] = (
-            momentum_df["MOM 1W"] * 0.10
-            + momentum_df["MOM 1M"] * 0.15
-            + momentum_df["MOM 3M"] * 0.25
-            + momentum_df["MOM 6M"] * 0.30
-            + momentum_df["MOM 12M"] * 0.20
+       momentum_df["Momentum composite"] = (
+    momentum_df["MOM 1W"] * w_1w
+    + momentum_df["MOM 1M"] * w_1m
+    + momentum_df["MOM 3M"] * w_3m
+    + momentum_df["MOM 6M"] * w_6m
+    + momentum_df["MOM 12M"] * w_12m
+           
         )
 
         momentum_df = momentum_df.reset_index()
