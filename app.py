@@ -400,7 +400,8 @@ df["Momentum data valid"] = df[["MOM 1W", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M
 # Relativ udvikling (syntetisk trend)
 # ----------------------------------------
 
-trend_prices = prices.copy()
+tickers = df["Yahoo"].dropna().unique().tolist()
+trend_prices = download_prices(tickers, period="13mo")
 
 trend_index = (
     trend_prices
