@@ -396,6 +396,68 @@ for col in ["MOM 1W", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M", "Momentum raw", "
 # Valide momentumdata kræver alle 1W/1/3/6/12M afkast.
 df["Momentum data valid"] = df[["MOM 1W", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]].notna().all(axis=1)
 
+# ----------------------------------------
+# Relativ udvikling (syntetisk trend)
+# ----------------------------------------
+
+trend_prices = prices.copy()
+
+trend_index = (
+    trend_prices
+    .resample("ME")
+    .last()
+    .pct_change()
+    .add(1)
+    .cumprod()
+    * 100
+)
+
+trend_index.iloc[0] = 100
+
+# Tilføj portefølje
+weights = (
+    df
+    .set_index("Ticker")["Weight"]
+    .reindex(trend_index.columns)
+    .fillna(0)
+)
+
+trend_index["Portefølje"] = (
+    trend_index.mul(weights, axis=1)
+    .sum(axis=1)
+)
+
+import plotly.graph_objects as go
+
+fig = go.Figure()
+
+for col in trend_index.columns:
+
+    width = 4 if col == "Portefølje" else 2
+
+    fig.add_trace(
+        go.Scatter(
+            x=trend_index.index,
+            y=trend_index[col],
+            mode="lines",
+            name=col,
+            line=dict(width=width),
+        )
+    )
+
+fig.update_layout(
+    title="Relativ trendudvikling – indeks 100",
+    template="plotly_dark",
+    height=650,
+    xaxis_title="Måned",
+    yaxis_title="Indekseret udvikling",
+    hovermode="x unified",
+)
+
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
 
 # ---------------------------------------------------
 # Sharpe / Sortino
