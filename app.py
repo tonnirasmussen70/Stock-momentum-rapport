@@ -418,7 +418,7 @@ trend_index.iloc[0] = 100
 # Tilføj portefølje
 weights = (
     df
-    .set_index("Ticker")["Weight"]
+    .set_index("Ticker")["Weight %"]
     .reindex(trend_index.columns)
     .fillna(0)
 )
