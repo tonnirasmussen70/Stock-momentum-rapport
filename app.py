@@ -1117,31 +1117,75 @@ st.plotly_chart(fig_allocation, use_container_width=True)
 
 col_buy, col_reduce = st.columns(2)
 
+top_cols = [
+    name_col,
+    "Yahoo",
+    "Current weight",
+    "Suggested weight",
+    "Weight change",
+    "Market value",
+    "Trade DKK",
+    "Portfolio score",
+    "Anbef."
+]
+top_cols = [c for c in top_cols if c in rebalance_df.columns]
+
+def format_top_table(input_df):
+    out = input_df[top_cols].copy()
+
+    out = out.rename(columns={
+        name_col: "Instrument",
+        "Current weight": "Aktuel",
+        "Suggested weight": "Forslag",
+        "Weight change": "Ændring",
+        "Market value": "Eksponering",
+        "Trade DKK": "Handel",
+        "Portfolio score": "Score"
+    })
+
+    for col in ["Aktuel", "Forslag", "Ændring"]:
+        if col in out.columns:
+            out[col] = out[col].apply(format_pct)
+
+    for col in ["Eksponering", "Handel"]:
+        if col in out.columns:
+            out[col] = out[col].apply(format_kr)
+
+    if "Score" in out.columns:
+        out["Score"] = out["Score"].apply(format_score_1)
+
+    return out
+
 with col_buy:
     st.subheader("Top buys")
 
-    top_buys = display_rebalance[display_rebalance["Anbef."] == "Øg"].copy()
+    top_buys_raw = (
+        rebalance_df[rebalance_df["Anbef."] == "Øg"]
+        .sort_values(["Portfolio score", "Weight change"], ascending=[False, False])
+        .head(5)
+    )
 
-top_buys["_score"] = rebalance_df.loc[top_buys.index, "Portfolio score"]
-top_buys["_change"] = rebalance_df.loc[top_buys.index, "Weight change"]
-
-top_buys = (
-    top_buys
-    .sort_values(["_score", "_change"], ascending=[False, False])
-    .drop(columns=["_score", "_change"])
-    .head(5)
-)
+    st.dataframe(
+        zebra_table(format_top_table(top_buys_raw)),
+        use_container_width=True,
+        hide_index=True,
+        height=table_height(top_buys_raw, max_height=350)
+    )
 
 with col_reduce:
     st.subheader("Top reductions")
 
-    top_reductions = display_rebalance[display_rebalance["Anbef."].str.contains("Reducer", na=False)].head(5)
+    top_reductions_raw = (
+        rebalance_df[rebalance_df["Anbef."].str.contains("Reducer", na=False)]
+        .sort_values(["Weight change"], ascending=True)
+        .head(5)
+    )
 
     st.dataframe(
-        zebra_table(top_reductions),
+        zebra_table(format_top_table(top_reductions_raw)),
         use_container_width=True,
         hide_index=True,
-        height=table_height(top_reductions, max_height=350)
+        height=table_height(top_reductions_raw, max_height=350)
     )
 
 
