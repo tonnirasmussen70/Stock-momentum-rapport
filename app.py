@@ -1120,14 +1120,17 @@ col_buy, col_reduce = st.columns(2)
 with col_buy:
     st.subheader("Top buys")
 
-    top_buys = display_rebalance[display_rebalance["Anbef."] == "Øg"].head(5)
+    top_buys = display_rebalance[display_rebalance["Anbef."] == "Øg"].copy()
 
-    st.dataframe(
-        zebra_table(top_buys),
-        use_container_width=True,
-        hide_index=True,
-        height=table_height(top_buys, max_height=350)
-    )
+top_buys["_score"] = rebalance_df.loc[top_buys.index, "Portfolio score"]
+top_buys["_change"] = rebalance_df.loc[top_buys.index, "Weight change"]
+
+top_buys = (
+    top_buys
+    .sort_values(["_score", "_change"], ascending=[False, False])
+    .drop(columns=["_score", "_change"])
+    .head(5)
+)
 
 with col_reduce:
     st.subheader("Top reductions")
