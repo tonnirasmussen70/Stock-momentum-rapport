@@ -134,6 +134,10 @@ trade_threshold = st.sidebar.slider(
     format="%.3f"
 )
 
+if st.sidebar.button("🔄 Clear cache og genberegn"):
+    st.cache_data.clear()
+    st.rerun()
+
 
 # ---------------------------------------------------
 # Kontrol af kolonner
@@ -321,23 +325,41 @@ def calculate_momentum(dataframe):
         if price_data is None or price_data.empty:
             return pd.DataFrame(columns=empty_cols)
 
-        price_data = price_data.ffill().dropna(how="all")
-        latest = price_data.iloc[-1]
+        if isinstance(price_data, pd.Series):
+            price_data = price_data.to_frame()
 
-        def calc_return(days):
-            if len(price_data) > days:
-                return price_data.iloc[-1] / price_data.iloc[-(days + 1)] - 1
-            return pd.Series(np.nan, index=price_data.columns)
+        price_data = price_data.sort_index().dropna(how="all")
 
-        momentum_df = pd.DataFrame(index=price_data.columns)
-        momentum_df["MOM 1W"] = calc_return(5)
-        momentum_df["MOM 1M"] = calc_return(21)
-        momentum_df["MOM 3M"] = calc_return(63)
-        momentum_df["MOM 6M"] = calc_return(126)
-        momentum_df["MOM 12M"] = calc_return(252)
+        periods = {
+            "MOM 1W": 5,
+            "MOM 1M": 21,
+            "MOM 3M": 63,
+            "MOM 6M": 126,
+            "MOM 12M": 252
+        }
 
-        # Momentum vægtning:
-        # 1W bruges som tidlig acceleration, men vægter lavere end 3/6/12M.
+        rows = []
+
+        for ticker in price_data.columns:
+            prices = price_data[ticker].dropna()
+            row = {"Yahoo": ticker}
+
+            for label, days in periods.items():
+                if len(prices) > days:
+                    latest_price = prices.iloc[-1]
+                    past_price = prices.iloc[-(days + 1)]
+                    row[label] = latest_price / past_price - 1 if past_price > 0 else np.nan
+                else:
+                    row[label] = np.nan
+
+            rows.append(row)
+
+        momentum_df = pd.DataFrame(rows)
+
+        for col in ["MOM 1W", "MOM 1M", "MOM 3M", "MOM 6M", "MOM 12M"]:
+            if col not in momentum_df.columns:
+                momentum_df[col] = np.nan
+
         momentum_df["Momentum raw"] = (
             momentum_df["MOM 1W"] * 0.05
             + momentum_df["MOM 1M"] * 0.10
@@ -346,23 +368,18 @@ def calculate_momentum(dataframe):
             + momentum_df["MOM 12M"] * 0.35
         )
 
-       # Momentum composite
         momentum_df["Momentum composite"] = (
             momentum_df["MOM 1W"].fillna(0) * w_1w
             + momentum_df["MOM 1M"].fillna(0) * w_1m
             + momentum_df["MOM 3M"].fillna(0) * w_3m
             + momentum_df["MOM 6M"].fillna(0) * w_6m
             + momentum_df["MOM 12M"].fillna(0) * w_12m
-           
         )
-
-        momentum_df = momentum_df.reset_index()
-        first_col = momentum_df.columns[0]
-        momentum_df = momentum_df.rename(columns={first_col: "Yahoo"})
 
         return momentum_df[empty_cols]
 
-    except Exception:
+    except Exception as e:
+        st.warning(f"Momentum kunne ikke beregnes: {e}")
         return pd.DataFrame(columns=empty_cols)
 
 
