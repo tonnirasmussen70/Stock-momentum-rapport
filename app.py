@@ -326,7 +326,7 @@ def calculate_momentum(dataframe):
 
         def calc_return(days):
             if len(price_data) > days:
-                return latest / price_data.iloc[-days] - 1
+                return price_data.iloc[-1] / price_data.iloc[-(days + 1)] - 1
             return pd.Series(np.nan, index=price_data.columns)
 
         momentum_df = pd.DataFrame(index=price_data.columns)
