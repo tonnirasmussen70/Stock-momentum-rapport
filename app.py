@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 st.caption(
-    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap · Version 2026-07-24.6"
+    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap · Version 2026-07-24.7"
 )
 
 
@@ -662,16 +662,6 @@ def minmax_score(value, low, high):
     return float(np.clip((value - low) / (high - low), 0, 1))
 
 
-benchmark_trend_score = 0.5
-if len(benchmark_series) >= 200:
-    benchmark_ma50 = benchmark_series.rolling(50).mean().iloc[-1]
-    benchmark_ma200 = benchmark_series.rolling(200).mean().iloc[-1]
-    benchmark_trend_score = 1.0 if benchmark_ma50 > benchmark_ma200 else 0.25
-elif len(benchmark_series) >= 100:
-    benchmark_ma50 = benchmark_series.rolling(50).mean().iloc[-1]
-    benchmark_ma100 = benchmark_series.rolling(100).mean().iloc[-1]
-    benchmark_trend_score = 1.0 if benchmark_ma50 > benchmark_ma100 else 0.25
-
 
 def confidence_components(row):
     momentum = minmax_score(row["Momentum composite"], -0.15, 0.45)
@@ -684,24 +674,27 @@ def confidence_components(row):
     volatility = 1 - minmax_score(row["Volatility"], 0.10, 0.60)
     drawdown = 1 - minmax_score(abs(row["Max drawdown"]), 0.05, 0.50)
 
-    # Kapitalflow er her en transparent markedsdata-proxy:
-    # kort acceleration + relativ styrke.
-    acceleration = row["MOM 1W"] - (row["MOM 3M"] / 13 if pd.notna(row["MOM 3M"]) else 0)
+    # Kapitalflow er en markedsdata-proxy baseret på kort acceleration
+    # kombineret med relativ styrke.
+    acceleration = row["MOM 1W"] - (
+        row["MOM 3M"] / 13 if pd.notna(row["MOM 3M"]) else 0
+    )
     capital_flow = (
         0.55 * minmax_score(acceleration, -0.05, 0.05)
         + 0.45 * minmax_score(row["Relative strength"], -0.15, 0.20)
     )
 
-    macro_regime = benchmark_trend_score
     relative_strength = minmax_score(row["Relative strength"], -0.15, 0.20)
 
+    # AI Confidence uden Makroregime:
+    # Momentum 30%, Trend 20%, Volatilitet 10%, Drawdown 10%,
+    # Kapitalflow 15%, Relativ styrke 15%.
     score = (
         0.30 * momentum
         + 0.20 * trend
         + 0.10 * volatility
         + 0.10 * drawdown
-        + 0.10 * capital_flow
-        + 0.05 * macro_regime
+        + 0.15 * capital_flow
         + 0.15 * relative_strength
     ) * 100
 
@@ -713,11 +706,9 @@ def confidence_components(row):
             "AI Volatility": volatility * 100,
             "AI Drawdown": drawdown * 100,
             "AI Capital flow": capital_flow * 100,
-            "AI Makro": macro_regime * 100,
             "AI Relative strength": relative_strength * 100,
         }
     )
-
 
 confidence_df = df.apply(confidence_components, axis=1)
 df = pd.concat([df, confidence_df], axis=1)
@@ -761,7 +752,6 @@ def build_ai_explanation(row):
         "volatilitet": row.get("AI Volatility", np.nan),
         "drawdown": row.get("AI Drawdown", np.nan),
         "kapitalflow": row.get("AI Capital flow", np.nan),
-        "makroregime": row.get("AI Makro", np.nan),
         "relativ styrke": row.get("AI Relative strength", np.nan),
     }
 
@@ -1249,7 +1239,7 @@ with tab_ai:
     st.info(
         f"**Fortolkning: {portfolio_confidence_text}.** "
         "Tallet er porteføljevægtet og viser, hvor stærkt de nuværende positioner "
-        "understøttes af momentum, trend, risiko, kapitalflow, makroregime og relativ styrke. "
+        "understøttes af momentum, trend, risiko, kapitalflow og relativ styrke. "
         "Det er ikke sandsynligheden for positivt afkast."
     )
 
@@ -1265,7 +1255,6 @@ with tab_ai:
             "AI Volatility",
             "AI Drawdown",
             "AI Capital flow",
-            "AI Makro",
             "AI Relative strength",
             "AI forklaring",
         ]
@@ -1281,7 +1270,6 @@ with tab_ai:
             "AI Volatility": "Volatilitet",
             "AI Drawdown": "Drawdown",
             "AI Capital flow": "Kapitalflow",
-            "AI Makro": "Makroregime",
             "AI Relative strength": "Relativ styrke",
             "AI forklaring": "AI forklaring",
         }
@@ -1295,18 +1283,38 @@ with tab_ai:
         "Volatilitet",
         "Drawdown",
         "Kapitalflow",
-        "Makroregime",
         "Relativ styrke",
     ]:
         ai_display[column] = ai_display[column].apply(
             lambda value: f"{format_score(value, 0)}%"
         )
 
+    ai_styler = zebra_table(ai_display)
+    if "AI forklaring" in ai_display.columns:
+        ai_styler = ai_styler.set_properties(
+            subset=["AI forklaring"],
+            **{
+                "white-space": "normal",
+                "word-wrap": "break-word",
+                "overflow-wrap": "anywhere",
+                "min-width": "320px",
+                "max-width": "520px",
+                "text-align": "left",
+            },
+        )
+
     st.dataframe(
-        zebra_table(ai_display),
+        ai_styler,
         use_container_width=True,
         hide_index=True,
-        height=table_height(ai_display, max_height=700),
+        height=table_height(ai_display, row_px=58, max_height=850),
+        column_config={
+            "AI forklaring": st.column_config.TextColumn(
+                "AI forklaring",
+                width="large",
+                help="Kort forklaring på hvilke faktorer der styrker og begrænser confidence.",
+            )
+        },
     )
 
     st.subheader("AI Confidence-ranking")
@@ -1336,7 +1344,7 @@ with tab_ai:
     st.plotly_chart(fig_ranking, use_container_width=True)
 
     st.subheader("Confidence-faktorer pr. aktie")
-    factor_columns = ["Momentum", "Trend", "Volatilitet", "Drawdown", "Kapitalflow", "Makroregime", "Relativ styrke"]
+    factor_columns = ["Momentum", "Trend", "Volatilitet", "Drawdown", "Kapitalflow", "Relativ styrke"]
     factor_heatmap = (
         ai_table[["Instrument", *factor_columns]]
         .set_index("Instrument")
@@ -1454,7 +1462,7 @@ with tab_ai:
         )
 
         st.caption(
-            "Kapitalflow og makroregime er markedsdatabaserede proxyer – ikke direkte "
+            "Kapitalflow er en markedsdatabaseret proxy – ikke direkte "
             "institutionelle fund-flowdata. Confidence er beslutningsstøtte og ikke en garanti."
         )
 
