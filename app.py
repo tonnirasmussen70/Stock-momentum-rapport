@@ -1395,7 +1395,7 @@ with tab_heatmap:
     if "Risiko" in normalized.columns:
         normalized["Risiko"] = -normalized["Risiko"]
 
-    text_matrix = heat_values.applymap(
+    text_matrix = heat_values.map(
         lambda value: "" if pd.isna(value) else f"{value:.1f}"
     )
 
