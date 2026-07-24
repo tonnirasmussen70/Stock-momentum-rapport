@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 st.caption(
-    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap · Version 2026-07-24.4"
+    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap · Version 2026-07-24.6"
 )
 
 
@@ -740,6 +740,62 @@ def confidence_label(score):
 df["Confidence niveau"] = df["AI Confidence"].apply(confidence_label)
 
 
+def portfolio_confidence_label(score):
+    if pd.isna(score):
+        return "Datamangel"
+    if score >= 80:
+        return "Meget stærkt signalgrundlag"
+    if score >= 70:
+        return "Stærkt signalgrundlag"
+    if score >= 55:
+        return "Blandet / moderat signalgrundlag"
+    if score >= 40:
+        return "Svagt signalgrundlag"
+    return "Meget svagt signalgrundlag"
+
+
+def build_ai_explanation(row):
+    factors = {
+        "momentum": row.get("AI Momentum", np.nan),
+        "trend": row.get("AI Trend", np.nan),
+        "volatilitet": row.get("AI Volatility", np.nan),
+        "drawdown": row.get("AI Drawdown", np.nan),
+        "kapitalflow": row.get("AI Capital flow", np.nan),
+        "makroregime": row.get("AI Makro", np.nan),
+        "relativ styrke": row.get("AI Relative strength", np.nan),
+    }
+
+    valid = {name: float(value) for name, value in factors.items() if pd.notna(value)}
+    if not valid:
+        return "Utilstrækkelige data til en forklaring."
+
+    strongest = sorted(valid.items(), key=lambda item: item[1], reverse=True)[:2]
+    weakest = sorted(valid.items(), key=lambda item: item[1])[:2]
+
+    strong_text = " og ".join(name for name, _ in strongest)
+    weak_text = " og ".join(name for name, _ in weakest)
+
+    confidence = row.get("AI Confidence", np.nan)
+    recommendation = row.get("Anbefaling", "Hold")
+
+    if pd.notna(confidence) and confidence >= 80:
+        opening = f"{recommendation}: meget stærkt samlet signal"
+    elif pd.notna(confidence) and confidence >= 65:
+        opening = f"{recommendation}: godt samlet signal"
+    elif pd.notna(confidence) and confidence >= 50:
+        opening = f"{recommendation}: blandet signalbillede"
+    else:
+        opening = f"{recommendation}: svagt samlet signal"
+
+    return (
+        f"{opening}. Styrkes især af {strong_text}. "
+        f"Confidence begrænses især af {weak_text}."
+    )
+
+
+df["AI forklaring"] = df.apply(build_ai_explanation, axis=1)
+
+
 # =========================================================
 # RELATIV TREND OG MONTHLY HEATMAP
 # =========================================================
@@ -1182,11 +1238,20 @@ with tab_ai:
     buy_count = int((df["Anbefaling"] == "Øg").sum())
     reduce_count = int(df["Anbefaling"].str.contains("Reducer", na=False).sum())
 
+    portfolio_confidence_text = portfolio_confidence_label(avg_confidence)
+
     ai1, ai2, ai3, ai4 = st.columns(4)
     ai1.metric("Porteføljens confidence", f"{avg_confidence:.0f}%")
     ai2.metric("Høj confidence", high_confidence_count)
     ai3.metric("Købssignaler", buy_count)
     ai4.metric("Reduktionssignaler", reduce_count)
+
+    st.info(
+        f"**Fortolkning: {portfolio_confidence_text}.** "
+        "Tallet er porteføljevægtet og viser, hvor stærkt de nuværende positioner "
+        "understøttes af momentum, trend, risiko, kapitalflow, makroregime og relativ styrke. "
+        "Det er ikke sandsynligheden for positivt afkast."
+    )
 
     ai_name = "Navn" if "Navn" in df.columns else "Ticker"
     ai_table = df[
@@ -1202,6 +1267,7 @@ with tab_ai:
             "AI Capital flow",
             "AI Makro",
             "AI Relative strength",
+            "AI forklaring",
         ]
     ].copy()
 
@@ -1217,6 +1283,7 @@ with tab_ai:
             "AI Capital flow": "Kapitalflow",
             "AI Makro": "Makroregime",
             "AI Relative strength": "Relativ styrke",
+            "AI forklaring": "AI forklaring",
         }
     ).sort_values("Confidence", ascending=False)
 
@@ -1291,63 +1358,105 @@ with tab_ai:
     )
     st.plotly_chart(fig_factor_heatmap, use_container_width=True)
 
-    st.subheader("Detaljeret confidence-profil")
-    radar_options = ranking_df.sort_values("Confidence", ascending=False)["Instrument"].astype(str).tolist()
-    selected_instrument = st.selectbox("Vælg aktie", radar_options, index=0, key="ai_confidence_radar_stock")
-    selected_row = ai_table.loc[ai_table["Instrument"].astype(str) == selected_instrument].iloc[0]
-    radar_values = [float(selected_row[column]) for column in factor_columns]
-    radar_values_closed = radar_values + [radar_values[0]]
-    radar_labels_closed = factor_columns + [factor_columns[0]]
-    fig_radar = go.Figure()
-    fig_radar.add_trace(go.Scatterpolar(
-        r=radar_values_closed,
-        theta=radar_labels_closed,
-        fill="toself",
-        name=selected_instrument,
-        hovertemplate="%{theta}: %{r:.0f}<extra></extra>",
-    ))
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickvals=[0, 20, 40, 60, 80, 100])),
-        showlegend=False,
-        height=520,
-        margin=dict(l=40, r=40, t=60, b=40),
-        title=(f"{selected_instrument} · Confidence {selected_row['Confidence']:.0f}% · {selected_row['Anbefaling']}"),
-    )
-    st.plotly_chart(fig_radar, use_container_width=True)
+    col_profile, col_observations = st.columns([1.15, 0.85], gap="large")
 
-    st.subheader("Vigtigste observationer")
+    with col_profile:
+        st.subheader("Detaljeret confidence-profil")
 
-    strongest = df.sort_values("AI Confidence", ascending=False).head(3)
-    weakest = df.sort_values("AI Confidence", ascending=True).head(3)
-    concentrated = df.sort_values("Current weight", ascending=False).head(3)
+        radar_options = ai_table["Instrument"].astype(str).tolist()
+        selected_instrument = st.selectbox(
+            "Vælg aktie",
+            radar_options,
+            index=0,
+            key="ai_confidence_radar_stock",
+        )
 
-    strongest_names = ", ".join(
-        strongest[ai_name].astype(str).tolist()
-    )
-    weakest_names = ", ".join(
-        weakest[ai_name].astype(str).tolist()
-    )
-    concentrated_names = ", ".join(
-        concentrated[ai_name].astype(str).tolist()
-    )
+        selected_row = ai_table.loc[
+            ai_table["Instrument"].astype(str) == selected_instrument
+        ].iloc[0]
 
-    st.success(
-        f"Stærkeste beslutningsgrundlag: {strongest_names}. "
-        "Disse positioner har den højeste samlede confidence i den nuværende model."
-    )
-    st.warning(
-        f"Svageste beslutningsgrundlag: {weakest_names}. "
-        "Kontroller trend, risiko og datakvalitet før nye køb."
-    )
-    st.info(
-        f"Største koncentrationer: {concentrated_names}. "
-        "Vurder om de fortsat passer til din valgte maksimumvægt."
-    )
+        radar_values = [float(selected_row[column]) for column in factor_columns]
+        radar_values_closed = radar_values + [radar_values[0]]
+        radar_labels_closed = factor_columns + [factor_columns[0]]
 
-    st.caption(
-        "Kapitalflow og makroregime er markedsdatabaserede proxyer – ikke direkte "
-        "institutionelle fund-flowdata. Confidence er beslutningsstøtte og ikke en garanti."
-    )
+        fig_radar = go.Figure()
+
+        fig_radar.add_trace(
+            go.Scatterpolar(
+                r=radar_values_closed,
+                theta=radar_labels_closed,
+                fill="toself",
+                name=selected_instrument,
+                hovertemplate="%{theta}: %{r:.0f}<extra></extra>",
+            )
+        )
+
+        fig_radar.update_layout(
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 100],
+                    tickvals=[0, 20, 40, 60, 80, 100],
+                )
+            ),
+            showlegend=False,
+            height=520,
+            margin=dict(l=35, r=35, t=55, b=35),
+            title=(
+                f"{selected_instrument} · Confidence "
+                f"{selected_row['Confidence']:.0f}% · "
+                f"{selected_row['Anbefaling']}"
+            ),
+        )
+
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+        selected_explanation = selected_row.get("AI forklaring", "")
+        if selected_explanation:
+            st.info(
+                f"**AI-forklaring for {selected_instrument}:** "
+                f"{selected_explanation}"
+            )
+
+    with col_observations:
+        st.subheader("Vigtigste observationer")
+
+        strongest = df.sort_values("AI Confidence", ascending=False).head(3)
+        weakest = df.sort_values("AI Confidence", ascending=True).head(3)
+        concentrated = df.sort_values("Current weight", ascending=False).head(3)
+
+        strongest_names = ", ".join(
+            strongest[ai_name].astype(str).tolist()
+        )
+        weakest_names = ", ".join(
+            weakest[ai_name].astype(str).tolist()
+        )
+        concentrated_names = ", ".join(
+            concentrated[ai_name].astype(str).tolist()
+        )
+
+        st.success(
+            f"**Stærkeste beslutningsgrundlag**\n\n"
+            f"{strongest_names}\n\n"
+            "Disse positioner har den højeste samlede confidence i den nuværende model."
+        )
+
+        st.warning(
+            f"**Svageste beslutningsgrundlag**\n\n"
+            f"{weakest_names}\n\n"
+            "Kontroller trend, risiko og datakvalitet før nye køb."
+        )
+
+        st.info(
+            f"**Største koncentrationer**\n\n"
+            f"{concentrated_names}\n\n"
+            "Vurder om de fortsat passer til din valgte maksimumvægt."
+        )
+
+        st.caption(
+            "Kapitalflow og makroregime er markedsdatabaserede proxyer – ikke direkte "
+            "institutionelle fund-flowdata. Confidence er beslutningsstøtte og ikke en garanti."
+        )
 
 
 # =========================================================
@@ -1449,10 +1558,7 @@ with tab_heatmap:
         normalized["Risiko"] = -normalized["Risiko"]
 
     text_formatter = lambda value: "" if pd.isna(value) else f"{value:.1f}"
-    if hasattr(heat_values, "map"):
-        text_matrix = heat_values.map(text_formatter)
-    else:
-        text_matrix = heat_values.applymap(text_formatter)
+    text_matrix = heat_values.map(text_formatter)
 
     fig_risk = go.Figure(
         data=go.Heatmap(
