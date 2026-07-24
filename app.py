@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 st.caption(
-    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap"
+    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap · Version 2026-07-24.4"
 )
 
 
@@ -234,23 +234,33 @@ if missing_cols:
 
 df = df.copy()
 df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
-df["Market value"] = pd.to_numeric(df["Beholdning"], errors="coerce").fillna(0)
-df["Gevinst"] = pd.to_numeric(df["Gevinst"], errors="coerce").fillna(0)
 
-if not df["Gevinst"].dropna().empty and df["Gevinst"].abs().median() > 2:
-    df["Gevinst"] = df["Gevinst"] / 100
+# Numeriske grunddata
+for numeric_column in ["Antal", "Købskurs", "Aktuel kurs", "Beholdning"]:
+    df[numeric_column] = pd.to_numeric(df[numeric_column], errors="coerce")
 
-df["Cost value"] = np.where(
-    (1 + df["Gevinst"]) != 0,
-    df["Market value"] / (1 + df["Gevinst"]),
-    np.nan,
-)
-df["Gain/Loss"] = df["Market value"] - df["Cost value"]
+# Beholdning er autoritativ markedsværdi i DKK fra Excel-filen.
+df["Market value"] = df["Beholdning"].fillna(0)
+
+# Afkast beregnes direkte fra købskurs og aktuel kurs.
+# Det giver korrekt procentafkast uanset om aktien handles i DKK, SEK, EUR eller USD,
+# så længe købskurs og aktuel kurs står i samme handelsvaluta.
 df["Return %"] = np.where(
-    df["Cost value"] != 0,
-    df["Gain/Loss"] / df["Cost value"],
+    df["Købskurs"] > 0,
+    df["Aktuel kurs"] / df["Købskurs"] - 1,
     np.nan,
 )
+
+# Kostpris i DKK estimeres ud fra den aktuelle DKK-markedsværdi og kursforholdet.
+# Metoden undgår at blande udenlandske handelskurser direkte med danske kroner.
+# Eventuelle historiske valutakursændringer er ikke medregnet.
+df["Cost value"] = np.where(
+    (df["Aktuel kurs"] > 0) & (df["Købskurs"] > 0),
+    df["Market value"] * df["Købskurs"] / df["Aktuel kurs"],
+    np.nan,
+)
+
+df["Gain/Loss"] = df["Market value"] - df["Cost value"]
 
 total_value = float(df["Market value"].sum())
 total_cost = float(df["Cost value"].sum(skipna=True))
@@ -785,13 +795,19 @@ tab_overview, tab_momentum, tab_rebalance, tab_ai, tab_heatmap = st.tabs(
 with tab_overview:
     st.subheader("Porteføljeoversigt")
 
-    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6, kpi7 = st.columns(7)
     kpi1.metric("Porteføljeværdi", format_dkk(total_value))
-    kpi2.metric("Gevinst/tab", format_dkk(total_gain))
-    kpi3.metric("Afkast", format_pct(total_return))
-    kpi4.metric("Sharpe", format_score(sharpe_score, 2))
-    kpi5.metric("Sortino", format_score(sortino_score, 2))
-    kpi6.metric("Antal aktier", len(df))
+    kpi2.metric("Kostpris", format_dkk(total_cost))
+    kpi3.metric("Gevinst/tab", format_dkk(total_gain))
+    kpi4.metric("Afkast", format_pct(total_return))
+    kpi5.metric("Sharpe", format_score(sharpe_score, 2))
+    kpi6.metric("Sortino", format_score(sortino_score, 2))
+    kpi7.metric("Antal aktier", len(df))
+
+    st.caption(
+        "Afkast beregnes som aktuel kurs / købskurs − 1. Kostpris i DKK estimeres "
+        "ud fra Beholdning × købskurs / aktuel kurs. Historiske valutaændringer er ikke medregnet."
+    )
 
     overview = df.copy()
 
@@ -1226,41 +1242,78 @@ with tab_ai:
         height=table_height(ai_display, max_height=700),
     )
 
-    st.subheader("Confidence-fordeling")
+    st.subheader("AI Confidence-ranking")
 
-    confidence_chart = ai_table[
-        [
-            "Instrument",
-            "Momentum",
-            "Trend",
-            "Volatilitet",
-            "Drawdown",
-            "Kapitalflow",
-            "Makroregime",
-            "Relativ styrke",
-        ]
-    ].copy()
+    ranking_df = ai_table[
+        ["Instrument", "Confidence", "Niveau", "Anbefaling"]
+    ].copy().sort_values("Confidence", ascending=True)
+    ranking_df["Label"] = ranking_df["Confidence"].apply(lambda value: f"{value:.0f}%")
 
-    confidence_long = confidence_chart.melt(
-        id_vars="Instrument",
-        var_name="Faktor",
-        value_name="Score",
+    fig_ranking = px.bar(
+        ranking_df,
+        x="Confidence",
+        y="Instrument",
+        orientation="h",
+        text="Label",
+        hover_data={"Confidence": ":.1f", "Niveau": True, "Anbefaling": True, "Label": False},
     )
+    fig_ranking.update_traces(textposition="outside")
+    fig_ranking.update_layout(
+        xaxis_title="AI Confidence (%)",
+        yaxis_title="Aktie",
+        xaxis=dict(range=[0, 105]),
+        showlegend=False,
+        height=max(450, len(ranking_df) * 38),
+        margin=dict(l=20, r=80, t=20, b=20),
+    )
+    st.plotly_chart(fig_ranking, use_container_width=True)
 
-    fig_confidence = px.bar(
-        confidence_long,
-        x="Instrument",
-        y="Score",
-        color="Faktor",
-        barmode="stack",
+    st.subheader("Confidence-faktorer pr. aktie")
+    factor_columns = ["Momentum", "Trend", "Volatilitet", "Drawdown", "Kapitalflow", "Makroregime", "Relativ styrke"]
+    factor_heatmap = (
+        ai_table[["Instrument", *factor_columns]]
+        .set_index("Instrument")
+        .reindex(ranking_df.sort_values("Confidence", ascending=False)["Instrument"])
     )
-    fig_confidence.update_layout(
-        xaxis_title="Aktie",
-        yaxis_title="Faktorscore",
-        xaxis_tickangle=-45,
-        legend_title_text="",
+    fig_factor_heatmap = px.imshow(
+        factor_heatmap,
+        aspect="auto",
+        text_auto=".0f",
+        color_continuous_scale="RdYlGn",
+        zmin=0,
+        zmax=100,
+        labels={"x": "Confidence-faktor", "y": "Aktie", "color": "Score"},
     )
-    st.plotly_chart(fig_confidence, use_container_width=True)
+    fig_factor_heatmap.update_layout(
+        height=max(500, len(factor_heatmap) * 38),
+        xaxis_title="Confidence-faktor",
+        yaxis_title="Aktie",
+    )
+    st.plotly_chart(fig_factor_heatmap, use_container_width=True)
+
+    st.subheader("Detaljeret confidence-profil")
+    radar_options = ranking_df.sort_values("Confidence", ascending=False)["Instrument"].astype(str).tolist()
+    selected_instrument = st.selectbox("Vælg aktie", radar_options, index=0, key="ai_confidence_radar_stock")
+    selected_row = ai_table.loc[ai_table["Instrument"].astype(str) == selected_instrument].iloc[0]
+    radar_values = [float(selected_row[column]) for column in factor_columns]
+    radar_values_closed = radar_values + [radar_values[0]]
+    radar_labels_closed = factor_columns + [factor_columns[0]]
+    fig_radar = go.Figure()
+    fig_radar.add_trace(go.Scatterpolar(
+        r=radar_values_closed,
+        theta=radar_labels_closed,
+        fill="toself",
+        name=selected_instrument,
+        hovertemplate="%{theta}: %{r:.0f}<extra></extra>",
+    ))
+    fig_radar.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickvals=[0, 20, 40, 60, 80, 100])),
+        showlegend=False,
+        height=520,
+        margin=dict(l=40, r=40, t=60, b=40),
+        title=(f"{selected_instrument} · Confidence {selected_row['Confidence']:.0f}% · {selected_row['Anbefaling']}"),
+    )
+    st.plotly_chart(fig_radar, use_container_width=True)
 
     st.subheader("Vigtigste observationer")
 
@@ -1395,9 +1448,11 @@ with tab_heatmap:
     if "Risiko" in normalized.columns:
         normalized["Risiko"] = -normalized["Risiko"]
 
-    text_matrix = heat_values.applymap(
-        lambda value: "" if pd.isna(value) else f"{value:.1f}"
-    )
+    text_formatter = lambda value: "" if pd.isna(value) else f"{value:.1f}"
+    if hasattr(heat_values, "map"):
+        text_matrix = heat_values.map(text_formatter)
+    else:
+        text_matrix = heat_values.applymap(text_formatter)
 
     fig_risk = go.Figure(
         data=go.Heatmap(
