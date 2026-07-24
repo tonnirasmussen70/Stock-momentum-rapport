@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("📈 Stock Portfolio Dashboard")
 st.caption(
-    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap · Version 2026-07-24.2"
+    "Porteføljeoverblik, momentum, rebalancering, AI-beslutningsstøtte og risikoheatmap"
 )
 
 
@@ -234,33 +234,23 @@ if missing_cols:
 
 df = df.copy()
 df["Yahoo"] = df["Ticker"].apply(yahoo_ticker)
+df["Market value"] = pd.to_numeric(df["Beholdning"], errors="coerce").fillna(0)
+df["Gevinst"] = pd.to_numeric(df["Gevinst"], errors="coerce").fillna(0)
 
-# Numeriske grunddata
-for numeric_column in ["Antal", "Købskurs", "Aktuel kurs", "Beholdning"]:
-    df[numeric_column] = pd.to_numeric(df[numeric_column], errors="coerce")
+if not df["Gevinst"].dropna().empty and df["Gevinst"].abs().median() > 2:
+    df["Gevinst"] = df["Gevinst"] / 100
 
-# Beholdning er autoritativ markedsværdi i DKK fra Excel-filen.
-df["Market value"] = df["Beholdning"].fillna(0)
-
-# Afkast beregnes direkte fra købskurs og aktuel kurs.
-# Det giver korrekt procentafkast uanset om aktien handles i DKK, SEK, EUR eller USD,
-# så længe købskurs og aktuel kurs står i samme handelsvaluta.
-df["Return %"] = np.where(
-    df["Købskurs"] > 0,
-    df["Aktuel kurs"] / df["Købskurs"] - 1,
-    np.nan,
-)
-
-# Kostpris i DKK estimeres ud fra den aktuelle DKK-markedsværdi og kursforholdet.
-# Metoden undgår at blande udenlandske handelskurser direkte med danske kroner.
-# Eventuelle historiske valutakursændringer er ikke medregnet.
 df["Cost value"] = np.where(
-    (df["Aktuel kurs"] > 0) & (df["Købskurs"] > 0),
-    df["Market value"] * df["Købskurs"] / df["Aktuel kurs"],
+    (1 + df["Gevinst"]) != 0,
+    df["Market value"] / (1 + df["Gevinst"]),
     np.nan,
 )
-
 df["Gain/Loss"] = df["Market value"] - df["Cost value"]
+df["Return %"] = np.where(
+    df["Cost value"] != 0,
+    df["Gain/Loss"] / df["Cost value"],
+    np.nan,
+)
 
 total_value = float(df["Market value"].sum())
 total_cost = float(df["Cost value"].sum(skipna=True))
@@ -795,19 +785,13 @@ tab_overview, tab_momentum, tab_rebalance, tab_ai, tab_heatmap = st.tabs(
 with tab_overview:
     st.subheader("Porteføljeoversigt")
 
-    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6, kpi7 = st.columns(7)
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     kpi1.metric("Porteføljeværdi", format_dkk(total_value))
-    kpi2.metric("Kostpris", format_dkk(total_cost))
-    kpi3.metric("Gevinst/tab", format_dkk(total_gain))
-    kpi4.metric("Afkast", format_pct(total_return))
-    kpi5.metric("Sharpe", format_score(sharpe_score, 2))
-    kpi6.metric("Sortino", format_score(sortino_score, 2))
-    kpi7.metric("Antal aktier", len(df))
-
-    st.caption(
-        "Afkast beregnes som aktuel kurs / købskurs − 1. Kostpris i DKK estimeres "
-        "ud fra Beholdning × købskurs / aktuel kurs. Historiske valutaændringer er ikke medregnet."
-    )
+    kpi2.metric("Gevinst/tab", format_dkk(total_gain))
+    kpi3.metric("Afkast", format_pct(total_return))
+    kpi4.metric("Sharpe", format_score(sharpe_score, 2))
+    kpi5.metric("Sortino", format_score(sortino_score, 2))
+    kpi6.metric("Antal aktier", len(df))
 
     overview = df.copy()
 
@@ -1411,7 +1395,7 @@ with tab_heatmap:
     if "Risiko" in normalized.columns:
         normalized["Risiko"] = -normalized["Risiko"]
 
-    text_matrix = heat_values.map(
+    text_matrix = heat_values.applymap(
         lambda value: "" if pd.isna(value) else f"{value:.1f}"
     )
 
